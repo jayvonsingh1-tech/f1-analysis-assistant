@@ -1,0 +1,17 @@
+voice recognition and response
+hologram with slight interaction if possible
+real time data collection and display as well as forcasting
+suggests what to improve to reduce lap times from an engineering pov 
+strategy testing with most accuracy and precision
+includes affects of weather if it changes throughout race or is different from practise/qualifying
+shows vehicles on track with live lap time and difference in each lap and what is costing time
+able to respond to anything and can ask more questions if unsure
+generates optimal racing line, taking into account dirty air and weather and tyre wear and other factors
+calculates race position 
+after pit stop
+has all knowledge available about engineering side of f1 and can help me learn too 
+Quali-to-race pace delta
+Teammate comparison across a season
+Undercut/overcut calculator
+Corner-level analysis- throttle, brake, speed traces, whats costing speed
+fuel consumption trajectory and optimisatioin based on past sessions
