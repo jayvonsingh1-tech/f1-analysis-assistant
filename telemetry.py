@@ -228,5 +228,4 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=400):
     return animation
 
 if __name__ == '__main__':
-    plot_speed_map(2024, 'Monza', 'NOR')
-    
+    plot_speed_map(2024, 'Monza', 'NOR',)
