@@ -14,10 +14,13 @@ fastf1.set_log_level(logging.WARNING)
 
 style.apply()
 
-def display(fig=None):
+def display():
     """Show a figure without blocking the caller."""
     plt.show(block=False)
     plt.pause(0.1)
+
+def close_all():
+    plt.close('all')
 
 def load_session(year, race, session_type='R'):
     session = fastf1.get_session(year, race, session_type)
@@ -33,6 +36,9 @@ def get_lap_telemetry(year, race, driver, lap_number=None, session_type='R'):
         lap = laps.pick_fastest()
     else:
         lap = laps[laps['LapNumber'] == lap_number].iloc[0]
+
+    if lap is None:
+        raise ValueError(f"{driver} has no usable lap in this session.")
 
     telemetry = lap.get_telemetry().add_distance()
 
@@ -148,7 +154,11 @@ def compare_laps(year, race, driver_a, driver_b, session_type='R'):
     final = delta[-1]
     ahead = driver_b if final > 0 else driver_a
     style.title(fig, f"{driver_a} vs {driver_b} — {race} {year}",
-                f"Fastest laps  ·  {ahead} quicker by {abs(final):.3f}s")
+                f"{driver_a} lap {int(lap_a['LapNumber'])} "
+                f"({format_lap_time(lap_a['LapTime'])})   vs   "
+                f"{driver_b} lap {int(lap_b['LapNumber'])} "
+                f"({format_lap_time(lap_b['LapTime'])})  ·  "
+                f"{ahead} quicker by {abs(final):.3f}s")
     plt.tight_layout(rect=[0, 0, 1, 0.9])
     display()
 
@@ -170,7 +180,7 @@ def corner_analysis(year, race, driver_a, driver_b, session_type='R'):
     time_b = np.interp(grid, tel_b['Distance'], elapsed(tel_b))
     delta = time_a - time_b
 
-    numbers, changes = [], []
+    numbers, changes, speeds = [], [], []
     previous_distance = 0
 
     for _, corner in corners.iterrows():
@@ -181,6 +191,11 @@ def corner_analysis(year, race, driver_a, driver_b, session_type='R'):
         after = np.interp(distance, grid, delta)
         numbers.append(int(corner['Number']))
         changes.append(after - before)
+
+        window = tel_a[(tel_a['Distance'] > distance - 100) &
+                       (tel_a['Distance'] < distance + 100)]
+        speeds.append(float(window['Speed'].min()) if len(window) else None)
+
         previous_distance = distance
 
     colours = [style.DRIVER_B if change > 0 else style.DRIVER_A
@@ -197,14 +212,21 @@ def corner_analysis(year, race, driver_a, driver_b, session_type='R'):
     best = numbers[int(np.argmin(changes))] if changes else None
 
     style.title(fig, f"Corner by corner — {driver_a} vs {driver_b}",
-                f"{race} {year}  ·  bars above zero = {driver_a} losing"
-                + (f"  ·  worst T{worst}, best T{best}" if worst else ""))
+                f"{race} {year}  ·  "
+                f"{driver_a} lap {int(lap_a['LapNumber'])} "
+                f"({format_lap_time(lap_a['LapTime'])})   vs   "
+                f"{driver_b} lap {int(lap_b['LapNumber'])} "
+                f"({format_lap_time(lap_b['LapTime'])})  ·  "
+                f"bars above zero = {driver_a} losing")
     plt.tight_layout(rect=[0, 0, 1, 0.9])
     display()
 
-    # Return the numbers so the agent can talk about them
-    return {'corners': numbers, 'changes': changes,
-            'worst': worst, 'best': best}
+    return {'corners': numbers, 'changes': changes, 'speeds': speeds,
+            'worst': worst, 'best': best,
+            'lap_a': int(lap_a['LapNumber']),
+            'lap_b': int(lap_b['LapNumber']),
+            'time_a': format_lap_time(lap_a['LapTime']),
+            'time_b': format_lap_time(lap_b['LapTime'])}
 
 def plot_speed_map(year, race, driver, lap_number=None):
     """Track outline coloured by speed."""
@@ -453,7 +475,10 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500):
                        family='monospace', zorder=6)
 
     style.title(fig, f"{driver_a} vs {driver_b} — {race} {year}",
-                "Fastest laps, started together")
+                f"{driver_a} lap {int(lap_a['LapNumber'])} "
+                f"({format_lap_time(lap_a['LapTime'])})   vs   "
+                f"{driver_b} lap {int(lap_b['LapNumber'])} "
+                f"({format_lap_time(lap_b['LapTime'])})  ·  started together")
 
     def update(frame):
         car_a.set_data([xa[frame]], [ya[frame]])
@@ -477,12 +502,12 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500):
     animation = FuncAnimation(fig, update, frames=frames,
                               interval=25, blit=True, repeat=True)
 
-    # Keep a reference so it isn't garbage collected when called as a tool
     fig._animation = animation
 
     display()
     return animation
 
 if __name__ == '__main__':
-    animate_head_to_head(2024, 'Monza', 'NOR', 'PIA')
+    corner_analysis(2024, 'Monza', 'NOR', 'PIA')
+    plt.show()
     

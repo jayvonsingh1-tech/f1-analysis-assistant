@@ -10,6 +10,8 @@ import pandas as pd
 from dotenv import load_dotenv
 from anthropic import Anthropic
 
+import telemetry
+
 load_dotenv()
 fastf1.Cache.enable_cache('cache')
 fastf1.set_log_level(logging.WARNING)
@@ -49,8 +51,31 @@ def clean_laps(session, driver):
 
     return laps
 
+def check_driver_ran(session, driver):
+    """Return an explanation if the driver has no usable laps, else None."""
+    laps = session.laps.pick_drivers(driver)
+    if laps.empty:
+        return f"{driver} has no lap data for this session."
+
+    if laps['LapTime'].notna().sum() == 0:
+        return f"{driver} completed no timed laps in this session."
+
+    row = session.results[session.results['Abbreviation'] == driver]
+    if not row.empty:
+        status = str(row['Status'].iloc[0])
+        if status != 'Finished' and 'Lapped' not in status:
+            return (f"{driver} did not finish this race (status: {status}), "
+                    f"completing {len(laps)} laps. Race-long analysis is "
+                    f"incomplete and telemetry comparison may fail.")
+    return None
+
 def analyse_stints(year, race, driver):
     session = load_race(year, race)
+
+    problem = check_driver_ran(session, driver)
+    if problem:
+        return problem
+
     laps = clean_laps(session, driver)
 
     lines = [f"{driver} - {race} {year}",
@@ -99,6 +124,11 @@ def analyse_stints(year, race, driver):
 
 def compare(year, race, driver_a, driver_b):
     session = load_race(year, race)
+
+    for driver in (driver_a, driver_b):
+        problem = check_driver_ran(session, driver)
+        if problem:
+            return problem
 
     lines = []
     for driver in (driver_a, driver_b):
@@ -257,36 +287,15 @@ def race_events(year, race):
             lines.append("  Dry throughout")
 
     SKIP = (
-        'WAVED BLUE FLAG',
-        'IN TRACK SECTOR',
-        'TRACK LIMITS',
-        'ALL PASS HOLDERS',
-        'AWNINGS',
-        'PIT EXIT OPEN',
-        'PIT EXIT CLOSED',
-        'GREEN LIGHT - PIT EXIT',
-        'OVERTAKE ENABLED',
-        'OVERTAKE DISABLED',
-        'TRACK CLEAR',
-        'RISK OF RAIN',
-        'GRIP DELTA ACTIVE',
-        # Investigations that ended in no action are non-events
-        'NO FURTHER INVESTIGATION',
-        'NO FURTHER ACTION',
+        'WAVED BLUE FLAG', 'IN TRACK SECTOR', 'TRACK LIMITS',
+        'ALL PASS HOLDERS', 'AWNINGS', 'PIT EXIT OPEN', 'PIT EXIT CLOSED',
+        'GREEN LIGHT - PIT EXIT', 'OVERTAKE ENABLED', 'OVERTAKE DISABLED',
+        'TRACK CLEAR', 'RISK OF RAIN', 'GRIP DELTA ACTIVE',
+        'NO FURTHER INVESTIGATION', 'NO FURTHER ACTION',
     )
 
-    # Intermediate steps - keep only messages that changed something
-    LIFECYCLE = (
-        'NOTED -',
-        'UNDER INVESTIGATION',
-        'WILL BE INVESTIGATED',
-    )
-    OUTCOME = (
-        'PENALTY',
-        'REPRIMAND',
-        'DISQUALIFIED',
-        'BLACK AND WHITE FLAG',
-    )
+    LIFECYCLE = ('NOTED -', 'UNDER INVESTIGATION', 'WILL BE INVESTIGATED')
+    OUTCOME = ('PENALTY', 'REPRIMAND', 'DISQUALIFIED', 'BLACK AND WHITE FLAG')
 
     messages = session.race_control_messages
     if messages is not None and len(messages):
@@ -329,6 +338,133 @@ def race_events(year, race):
                      f"duplicate messages omitted in total.)")
 
     return "\n".join(lines)
+
+# --- Visual tools ---------------------------------------------------------
+
+def show_speed_map(year, race, driver):
+    telemetry.plot_speed_map(year, race, driver)
+    return (f"Speed map displayed: {driver}, {race} {year}, fastest lap. "
+            f"Track coloured by speed, corner numbers marked.")
+
+def show_gear_map(year, race, driver):
+    telemetry.plot_gear_map(year, race, driver)
+    return f"Gear map displayed: {driver}, {race} {year}, fastest lap."
+
+def corner_analysis(year, race, driver_a, driver_b, session_type='R'):
+    """Where each driver gains or loses, corner by corner."""
+    lap_a, tel_a, session = get_lap_telemetry(year, race, driver_a,
+                                              session_type=session_type)
+    lap_b, tel_b, _ = get_lap_telemetry(year, race, driver_b,
+                                        session_type=session_type)
+
+    corners = session.get_circuit_info().corners
+
+    def elapsed(tel):
+        return (tel['Time'] - tel['Time'].iloc[0]).dt.total_seconds()
+
+    max_distance = min(tel_a['Distance'].max(), tel_b['Distance'].max())
+    grid = np.linspace(0, max_distance, 2000)
+    time_a = np.interp(grid, tel_a['Distance'], elapsed(tel_a))
+    time_b = np.interp(grid, tel_b['Distance'], elapsed(tel_b))
+    delta = time_a - time_b
+
+    numbers, changes, speeds = [], [], []
+    previous_distance = 0
+
+    for _, corner in corners.iterrows():
+        distance = corner['Distance']
+        if distance > max_distance:
+            continue
+        before = np.interp(previous_distance, grid, delta)
+        after = np.interp(distance, grid, delta)
+        numbers.append(int(corner['Number']))
+        changes.append(after - before)
+
+        window = tel_a[(tel_a['Distance'] > distance - 100) &
+                       (tel_a['Distance'] < distance + 100)]
+        speeds.append(float(window['Speed'].min()) if len(window) else None)
+
+        previous_distance = distance
+
+    colours = [style.DRIVER_B if change > 0 else style.DRIVER_A
+               for change in changes]
+
+    fig, ax = plt.subplots(figsize=(13, 6))
+    ax.bar(range(len(numbers)), changes, color=colours)
+    ax.axhline(0, color=style.MUTED, linewidth=0.8)
+    ax.set_xticks(range(len(numbers)))
+    ax.set_xticklabels([f"T{n}" for n in numbers], fontsize=9)
+    ax.set_ylabel('Time change (s)')
+
+    worst = numbers[int(np.argmax(changes))] if changes else None
+    best = numbers[int(np.argmin(changes))] if changes else None
+
+    style.title(fig, f"Corner by corner — {driver_a} vs {driver_b}",
+                f"{race} {year}  ·  "
+                f"{driver_a} lap {int(lap_a['LapNumber'])} "
+                f"({format_lap_time(lap_a['LapTime'])})   vs   "
+                f"{driver_b} lap {int(lap_b['LapNumber'])} "
+                f"({format_lap_time(lap_b['LapTime'])})  ·  "
+                f"bars above zero = {driver_a} losing")
+    plt.tight_layout(rect=[0, 0, 1, 0.9])
+    display()
+
+    return {'corners': numbers, 'changes': changes, 'speeds': speeds,
+            'worst': worst, 'best': best,
+            'lap_a': int(lap_a['LapNumber']), 'lap_b': int(lap_b['LapNumber']),
+            'time_a': format_lap_time(lap_a['LapTime']),
+            'time_b': format_lap_time(lap_b['LapTime'])}
+
+def show_corner_analysis(year, race, driver_a, driver_b):
+    result = telemetry.corner_analysis(year, race, driver_a, driver_b)
+    lines = [f"Corner-by-corner chart displayed, {race} {year}. "
+             f"{driver_a} lap {result['lap_a']} ({result['time_a']}) vs "
+             f"{driver_b} lap {result['lap_b']} ({result['time_b']}). "
+             f"These are each driver's single fastest race lap, not averages.",
+             f"Per corner (positive = {driver_a} losing), with minimum "
+             f"speed through that corner:"]
+    for number, change, speed in zip(result['corners'], result['changes'],
+                                     result['speeds']):
+        speed_text = f", {speed:.0f} km/h min" if speed else ""
+        lines.append(f"  T{number}: {change:+.3f}s{speed_text}")
+    lines.append(f"Largest loss for {driver_a} at T{result['worst']}, "
+                 f"largest gain at T{result['best']}.")
+    return "\n".join(lines)
+
+def show_head_to_head(year, race, driver_a, driver_b):
+    telemetry.animate_head_to_head(year, race, driver_a, driver_b)
+    result = telemetry.corner_analysis(year, race, driver_a, driver_b)
+
+    lines = [f"Animation playing, {race} {year}. "
+             f"{driver_a} lap {result['lap_a']} ({result['time_a']}) vs "
+             f"{driver_b} lap {result['lap_b']} ({result['time_b']}), "
+             f"started together. These are each driver's single fastest race "
+             f"lap, not averages.",
+             f"Per corner (positive = {driver_a} losing), with minimum "
+             f"speed through that corner:"]
+    for number, change, speed in zip(result['corners'], result['changes'],
+                                     result['speeds']):
+        speed_text = f", {speed:.0f} km/h min" if speed else ""
+        lines.append(f"  T{number}: {change:+.3f}s{speed_text}")
+    lines.append(f"Largest loss for {driver_a} at T{result['worst']}, "
+                 f"largest gain at T{result['best']}.")
+    return "\n".join(lines)
+
+def show_strategy(year, race):
+    telemetry.plot_strategy(year, race)
+    return f"Tyre strategy chart displayed: {race} {year}, all drivers."
+
+def show_positions(year, race):
+    telemetry.plot_positions(year, race)
+    return f"Position changes displayed: {race} {year}."
+
+def show_gap_to_leader(year, race):
+    telemetry.plot_gap_to_leader(year, race)
+    return f"Gap to leader displayed: {race} {year}, top six finishers."
+
+def close_visuals():
+    telemetry.close_all()
+    return "Closed all open visuals."
 
 TOOLS = [
     {
@@ -448,6 +584,137 @@ TOOLS = [
             "required": ["year", "race"],
         },
     },
+    {
+        "name": "show_speed_map",
+        "description": (
+            "Display a visual: the circuit outline coloured by speed for one "
+            "driver's fastest lap, with corner numbers marked. Returns only a "
+            "confirmation, no lap data. Use when the user asks to see a lap, "
+            "see where a driver is fast or slow, or asks for a track map."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+                "driver": {"type": "string", "description": "Three-letter code"},
+            },
+            "required": ["year", "race", "driver"],
+        },
+    },
+    {
+        "name": "show_gear_map",
+        "description": (
+            "Display a visual: the circuit outline coloured by gear selection "
+            "for one driver's fastest lap. Returns only a confirmation, no lap "
+            "data. Use when the user asks about gears or how a lap is driven."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+                "driver": {"type": "string", "description": "Three-letter code"},
+            },
+            "required": ["year", "race", "driver"],
+        },
+    },
+    {
+        "name": "show_corner_analysis",
+        "description": (
+            "Display a chart AND return the numbers: how much time one driver "
+            "gains or loses to another at each individual corner on their "
+            "fastest laps. This is the only tool that gives corner-level time "
+            "differences. Use when the user asks where a driver is losing time, "
+            "which corners cost them, or why one driver was quicker on a lap."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+                "driver_a": {"type": "string", "description": "First driver code"},
+                "driver_b": {"type": "string", "description": "Second driver code"},
+            },
+            "required": ["year", "race", "driver_a", "driver_b"],
+        },
+    },
+    {
+        "name": "show_head_to_head",
+        "description": (
+            "Display an animation of two drivers' fastest laps replayed on the "
+            "track map, started together, AND return the corner-by-corner time "
+            "differences. Use when the user asks to watch, see or visualise two "
+            "drivers against each other on a lap."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+                "driver_a": {"type": "string", "description": "First driver code"},
+                "driver_b": {"type": "string", "description": "Second driver code"},
+            },
+            "required": ["year", "race", "driver_a", "driver_b"],
+        },
+    },
+    {
+        "name": "show_strategy",
+        "description": (
+            "Display a visual: every driver's tyre stints as coloured bars "
+            "across the race, in finishing order. Returns only a confirmation. "
+            "Use when the user asks to see strategy or compare what tyres "
+            "people ran."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+            },
+            "required": ["year", "race"],
+        },
+    },
+    {
+        "name": "show_positions",
+        "description": (
+            "Display a visual: every driver's track position lap by lap. "
+            "Returns only a confirmation. Use when the user asks how the race "
+            "unfolded or wants to see the progression."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+            },
+            "required": ["year", "race"],
+        },
+    },
+    {
+        "name": "show_gap_to_leader",
+        "description": (
+            "Display a visual: cumulative time gap to the winner for the top "
+            "six finishers. Returns only a confirmation. Use when the user asks "
+            "whether someone was pulling away or closing in."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+            },
+            "required": ["year", "race"],
+        },
+    },
+    {
+        "name": "close_visuals",
+        "description": (
+            "Close every open visual window. Use when the user asks to clear "
+            "the screen, close the charts, or start fresh."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 FUNCTIONS = {
@@ -457,6 +724,14 @@ FUNCTIONS = {
     'qualifying': qualifying,
     'season_calendar': season_calendar,
     'race_events': race_events,
+    'show_speed_map': show_speed_map,
+    'show_gear_map': show_gear_map,
+    'show_corner_analysis': show_corner_analysis,
+    'show_head_to_head': show_head_to_head,
+    'show_strategy': show_strategy,
+    'show_positions': show_positions,
+    'show_gap_to_leader': show_gap_to_leader,
+    'close_visuals': close_visuals,
 }
 
 SYSTEM_PROMPT = """You are an F1 race engineer's analysis assistant.
@@ -482,6 +757,16 @@ If you notice you're missing something the user asked for, and a tool can
 supply it, call that tool. Don't tell the user what you don't have when you
 could go and fetch it.
 
+You can display visuals. When the user asks about two drivers on the same lap,
+or where time is being gained or lost on track, call show_corner_analysis or
+show_head_to_head as well as answering, so they can see it.
+
+You CANNOT see the visuals you display. Describe only what a tool result
+explicitly states as data. Never describe corner exits, driving style, racing
+lines, how clean a lap looked, or anything else visual — you have no access to
+any of that. If a display tool returned only a confirmation, say nothing about
+the content of the image beyond what the numbers from other tools support.
+
 If a stint's pace looks anomalous — a very large trend, or a later stint much
 slower than an earlier one — call race_events before explaining it. A safety
 car, red flag or rain usually accounts for it.
@@ -501,8 +786,7 @@ When reading stint data:
 
 Only state race results, finishing positions, gaps between drivers,
 championship standings or incidents if a tool returned them. Never state a gap
-or a margin unless a tool gave you that exact number. If you don't have it, say
-you don't have it.
+or a margin unless a tool gave you that exact number.
 
 Don't attribute causes the data doesn't show. Don't call a performance
 excellent, strong or well managed — those are judgements about a driver that a
