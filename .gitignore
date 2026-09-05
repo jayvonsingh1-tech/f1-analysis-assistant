@@ -1,3 +1,6 @@
 .env
 cache/
 __pycache__/
+
+live_data.txt
+*.txt.recording

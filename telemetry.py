@@ -228,14 +228,18 @@ def corner_analysis(year, race, driver_a, driver_b, session_type='R'):
             'time_a': format_lap_time(lap_a['LapTime']),
             'time_b': format_lap_time(lap_b['LapTime'])}
 
-def plot_speed_map(year, race, driver, lap_number=None):
-    """Track outline coloured by speed."""
+def plot_speed_map(year, race, driver, lap_number=None, ax=None):
+    """Track outline coloured by speed. Draws into ax if given."""
     lap, tel, session = get_lap_telemetry(year, race, driver, lap_number)
+
+    standalone = ax is None
+    if standalone:
+        fig, ax = plt.subplots(figsize=(11, 9))
+    else:
+        fig = ax.get_figure()
 
     points = np.array([tel['X'], tel['Y']]).T.reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
-
-    fig, ax = plt.subplots(figsize=(11, 9))
 
     ax.plot(tel['X'], tel['Y'], linewidth=11, color=style.TRACK,
             solid_capstyle='round', zorder=1)
@@ -253,17 +257,21 @@ def plot_speed_map(year, race, driver, lap_number=None):
     ax.set_aspect('equal')
     ax.axis('off')
 
-    bar = fig.colorbar(collection, ax=ax, fraction=0.03, pad=0.02)
-    bar.set_label('Speed (km/h)', color=style.MUTED)
-    bar.outline.set_edgecolor(style.GRID)
-    bar.ax.tick_params(colors=style.MUTED)
+    if standalone:
+        bar = fig.colorbar(collection, ax=ax, fraction=0.03, pad=0.02)
+        bar.set_label('Speed (km/h)', color=style.MUTED)
+        bar.outline.set_edgecolor(style.GRID)
+        bar.ax.tick_params(colors=style.MUTED)
 
-    style.title(fig, f"{driver} — {race} {year}",
-                f"Lap {int(lap['LapNumber'])}  ·  {format_lap_time(lap['LapTime'])}"
-                f"  ·  top {tel['Speed'].max():.0f} km/h"
-                f"  ·  slowest {tel['Speed'].min():.0f} km/h")
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
-    display()
+        style.title(fig, f"{driver} — {race} {year}",
+                    f"Lap {int(lap['LapNumber'])}  ·  "
+                    f"{format_lap_time(lap['LapTime'])}"
+                    f"  ·  top {tel['Speed'].max():.0f} km/h")
+        plt.tight_layout(rect=[0, 0, 1, 0.92])
+        display()
+    else:
+        ax.set_title(f"{driver} lap {int(lap['LapNumber'])}",
+                     color=style.TEXT, fontsize=11)
 
 def plot_gear_map(year, race, driver, lap_number=None):
     """Track outline coloured by gear."""
@@ -510,4 +518,3 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500):
 if __name__ == '__main__':
     corner_analysis(2024, 'Monza', 'NOR', 'PIA')
     plt.show()
-    
