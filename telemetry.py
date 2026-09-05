@@ -604,4 +604,3 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500, ax=None):
 if __name__ == '__main__':
     animate_head_to_head(2024, 'Monza', 'NOR', 'PIA')
     plt.show()
-    
