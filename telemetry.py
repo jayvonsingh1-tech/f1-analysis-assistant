@@ -1,4 +1,5 @@
 import logging
+from os import times
 
 import fastf1
 import matplotlib.pyplot as plt
@@ -56,21 +57,33 @@ def draw_start_line(ax, tel):
                 textcoords='offset points', xytext=(12, 8),
                 color=style.MUTED, fontsize=9, zorder=6)
 
-def draw_corners(ax, session, fontsize=8):
-    """Number each corner on a track map."""
+def draw_corners(ax, session, fontsize=8, telemetry=None):
+    """Number each corner, offsetting labels away from the track centre."""
     try:
         corners = session.get_circuit_info().corners
     except Exception:
         return
 
-    for index, (_, corner) in enumerate(corners.iterrows()):
-        ax.plot(corner['X'], corner['Y'], marker='o', markersize=3,
+    # Centre of the circuit, used to push labels outward
+    centre_x = corners['X'].mean()
+    centre_y = corners['Y'].mean()
+
+    for _, corner in corners.iterrows():
+        x, y = corner['X'], corner['Y']
+
+        ax.plot(x, y, marker='o', markersize=3,
                 color=style.MUTED, zorder=5)
-        offset = (8, 8) if index % 2 == 0 else (-14, -12)
-        ax.annotate(f"{int(corner['Number'])}",
-                    (corner['X'], corner['Y']),
+
+        # Unit vector pointing outward from the centre
+        dx, dy = x - centre_x, y - centre_y
+        length = (dx * dx + dy * dy) ** 0.5 or 1
+        push = 18
+        offset = (dx / length * push, dy / length * push)
+
+        ax.annotate(f"{int(corner['Number'])}", (x, y),
                     textcoords='offset points', xytext=offset,
-                    color=style.MUTED, fontsize=fontsize, zorder=5)
+                    color=style.MUTED, fontsize=fontsize,
+                    ha='center', va='center', zorder=5)
 
 def mark_corners_on_axes(axes, session, label_axis=None):
     """Vertical corner lines on distance-based plots."""
@@ -515,6 +528,190 @@ def plot_gap_to_leader(year, race, drivers=None, ax=None):
     else:
         ax.set_title(f"Gap to {winner}", color=style.TEXT, fontsize=11)
 
+def animate_sector_map(year, race, driver, frames=400, ax=None, info_ax=None):
+    """Qualifying lap with sectors colouring in as the car completes them.
+
+    Purple = fastest in that sector by anyone in the session.
+    Green   = the driver's own best.
+    Yellow  = slower than their own best.
+    """
+    session = load_session(year, race, 'Q')
+    laps = session.laps.pick_drivers(driver)
+    lap = laps.pick_fastest()
+
+    if lap is None:
+        raise ValueError(f"{driver} has no qualifying lap.")
+
+    tel = lap.get_telemetry().add_distance()
+
+    session_best = {
+        1: session.laps['Sector1Time'].min(),
+        2: session.laps['Sector2Time'].min(),
+        3: session.laps['Sector3Time'].min(),
+    }
+    driver_best = {
+        1: laps['Sector1Time'].min(),
+        2: laps['Sector2Time'].min(),
+        3: laps['Sector3Time'].min(),
+    }
+    this_lap = {
+        1: lap['Sector1Time'],
+        2: lap['Sector2Time'],
+        3: lap['Sector3Time'],
+    }
+
+    PURPLE, GREEN, YELLOW = '#B24BF3', '#3FD860', '#E8B21F'
+
+    def sector_colour(number):
+        value = this_lap[number]
+        if pd.isna(value):
+            return style.MUTED
+        if not pd.isna(session_best[number]) and value <= session_best[number]:
+            return PURPLE
+        if not pd.isna(driver_best[number]) and value <= driver_best[number]:
+            return GREEN
+        return YELLOW
+
+    def sector_label(number):
+        colour = sector_colour(number)
+        if colour == PURPLE:
+            return "session best"
+        if colour == GREEN:
+            return "personal best"
+        if colour == YELLOW:
+            return "slower"
+        return "no time"
+
+    def elapsed(t):
+        return (t['Time'] - t['Time'].iloc[0]).dt.total_seconds()
+
+    seconds = elapsed(tel)
+
+    # Sector boundaries found by elapsed time, then mapped to distance.
+    times = [this_lap[n].total_seconds() if not pd.isna(this_lap[n]) else 0
+             for n in (1, 2, 3)]
+    cut_1 = times[0]
+    cut_2 = times[0] + times[1]
+
+    total_distance = tel['Distance'].max()
+    if cut_2 > 0:
+        bounds = [0,
+                  float(np.interp(cut_1, seconds, tel['Distance'])),
+                  float(np.interp(cut_2, seconds, tel['Distance'])),
+                  total_distance]
+    else:
+        bounds = [0, total_distance / 3, 2 * total_distance / 3, total_distance]
+
+    standalone = ax is None
+    if standalone:
+        fig, ax = plt.subplots(figsize=(12, 9))
+    else:
+        fig = ax.get_figure()
+
+    ax.plot(tel['X'], tel['Y'], linewidth=9 if standalone else 7,
+            color=style.TRACK, solid_capstyle='round', zorder=1)
+    draw_corners(ax, session, fontsize=8 if standalone else 6)
+
+    margin = 300
+    ax.set_xlim(tel['X'].min() - margin, tel['X'].max() + margin)
+    ax.set_ylim(tel['Y'].min() - margin, tel['Y'].max() + margin)
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    sector_lines = []
+    for number in (1, 2, 3):
+        line, = ax.plot([], [], linewidth=6 if standalone else 5,
+                        color=sector_colour(number),
+                        solid_capstyle='round', zorder=3)
+        sector_lines.append(line)
+
+    car, = ax.plot([], [], 'o', markersize=13 if standalone else 11,
+                   color=style.TEXT, markeredgecolor=style.BACKGROUND,
+                   markeredgewidth=2, zorder=5)
+
+    # Readout: its own panel when given one, otherwise clear of the track
+    if info_ax is not None:
+        info_ax.clear()
+        info_ax.axis('off')
+        target = info_ax
+        text_x, text_y = 0.05, 0.95
+        size = 13
+    else:
+        target = ax
+        span = tel['X'].max() - tel['X'].min()
+        ax.set_xlim(tel['X'].min() - span * 0.75, tel['X'].max() + 300)
+        text_x, text_y = 0.02, 0.95
+        size = 12
+
+    readout = target.text(text_x, text_y, '', transform=target.transAxes,
+                          color=style.TEXT, fontsize=size + 2, va='top',
+                          family='monospace', zorder=6)
+
+    for index, number in enumerate((1, 2, 3)):
+        target.text(text_x, text_y - 0.28 - index * 0.06,
+                    f"■ S{number}  {sector_label(number)}",
+                    transform=target.transAxes, color=sector_colour(number),
+                    fontsize=size - 1, va='top', family='monospace', zorder=6)
+
+    timeline = np.linspace(0, seconds.max(), frames)
+    xs = np.interp(timeline, seconds, tel['X'])
+    ys = np.interp(timeline, seconds, tel['Y'])
+    ds = np.interp(timeline, seconds, tel['Distance'])
+
+    if standalone:
+        style.title(fig, f"{driver} — {race} {year} qualifying",
+                    f"{format_lap_time(lap['LapTime'])}  ·  "
+                    f"purple = session best sector, green = personal best, "
+                    f"yellow = slower")
+    elif info_ax is None:
+        ax.set_title(f"{driver} qualifying sectors",
+                     color=style.TEXT, fontsize=11)
+
+    def update(frame):
+        distance = ds[frame]
+        car.set_data([xs[frame]], [ys[frame]])
+
+        artists = [car, readout]
+        for index in range(3):
+            start, end = bounds[index], bounds[index + 1]
+            if distance <= start:
+                sector_lines[index].set_data([], [])
+            else:
+                upto = min(distance, end)
+                mask = (tel['Distance'] >= start) & (tel['Distance'] <= upto)
+                sector_lines[index].set_data(tel['X'][mask], tel['Y'][mask])
+            artists.append(sector_lines[index])
+
+        current = 1 if distance < bounds[1] else (2 if distance < bounds[2] else 3)
+        readout.set_text(f"{driver}\n{format_lap_time(lap['LapTime'])}\n\n"
+                         f"Sector {current}\n{timeline[frame]:5.1f}s")
+
+        return artists
+
+    animation = FuncAnimation(fig, update, frames=frames,
+                              interval=25, blit=standalone, repeat=True)
+    fig._animation = animation
+
+    if standalone:
+        display()
+
+    sector_data = {
+        'lap_time': format_lap_time(lap['LapTime']),
+        'lap_number': int(lap['LapNumber']),
+        'sectors': [],
+    }
+    for number in (1, 2, 3):
+        value = this_lap[number]
+        sector_data['sectors'].append({
+            'number': number,
+            'time': None if pd.isna(value) else round(value.total_seconds(), 3),
+            'status': sector_label(number),
+            'session_best': None if pd.isna(session_best[number])
+                            else round(session_best[number].total_seconds(), 3),
+        })
+
+    return animation, sector_data
+
 def animate_head_to_head(year, race, driver_a, driver_b, frames=500,
                          ax=None, info_ax=None):
     """Two fastest laps replayed together on the track map.
@@ -649,6 +846,162 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500,
 
     return animation
 
+def corner_technique(year, race, driver_a, driver_b, session_type='R',
+                     threshold=0.05, ax=None):
+    """Compare two drivers corner by corner, and identify what differed.
+
+    For each corner where the time gap exceeds the threshold, reports the
+    four measurable inputs that explain most corner-level time loss:
+      - braking point: distance at which the brake first goes on
+      - minimum speed: apex speed
+      - throttle point: distance at which throttle returns above 50%
+      - exit speed: speed 150m after the corner
+
+    These are measurements, not explanations. The tool reports what
+    differed; it cannot say why.
+    """
+    lap_a, tel_a, session = get_lap_telemetry(year, race, driver_a,
+                                              session_type=session_type)
+    lap_b, tel_b, _ = get_lap_telemetry(year, race, driver_b,
+                                        session_type=session_type)
+
+    corners = session.get_circuit_info().corners
+
+    def elapsed(tel):
+        return (tel['Time'] - tel['Time'].iloc[0]).dt.total_seconds()
+
+    max_distance = min(tel_a['Distance'].max(), tel_b['Distance'].max())
+    grid = np.linspace(0, max_distance, 3000)
+    delta = (np.interp(grid, tel_a['Distance'], elapsed(tel_a))
+             - np.interp(grid, tel_b['Distance'], elapsed(tel_b)))
+
+    def corner_inputs(tel, corner_distance):
+        """Measure the four inputs around one corner."""
+        approach = tel[(tel['Distance'] > corner_distance - 350) &
+                       (tel['Distance'] < corner_distance + 50)]
+        through = tel[(tel['Distance'] > corner_distance - 120) &
+                      (tel['Distance'] < corner_distance + 120)]
+        after = tel[(tel['Distance'] > corner_distance) &
+                    (tel['Distance'] < corner_distance + 250)]
+        exit_zone = tel[(tel['Distance'] > corner_distance + 120) &
+                        (tel['Distance'] < corner_distance + 200)]
+
+        # First point on the brakes in the approach
+        braking = approach[approach['Brake'] == True]
+        brake_point = (float(braking['Distance'].iloc[0])
+                       if len(braking) else None)
+
+        minimum = float(through['Speed'].min()) if len(through) else None
+
+        # First point back above half throttle after the corner
+        on_power = after[after['Throttle'] > 50]
+        throttle_point = (float(on_power['Distance'].iloc[0])
+                          if len(on_power) else None)
+
+        exit_speed = float(exit_zone['Speed'].mean()) if len(exit_zone) else None
+
+        return {
+            'brake': brake_point,
+            'min_speed': minimum,
+            'throttle': throttle_point,
+            'exit_speed': exit_speed,
+        }
+
+    findings = []
+    previous_distance = 0
+
+    for _, corner in corners.iterrows():
+        distance = corner['Distance']
+        if distance > max_distance:
+            continue
+
+        before = np.interp(previous_distance, grid, delta)
+        after_delta = np.interp(distance, grid, delta)
+        change = after_delta - before
+        previous_distance = distance
+
+        if abs(change) < threshold:
+            continue
+
+        a = corner_inputs(tel_a, distance)
+        b = corner_inputs(tel_b, distance)
+
+        notes = []
+
+        if a['brake'] is not None and b['brake'] is not None:
+            gap = a['brake'] - b['brake']
+            if abs(gap) > 5:
+                who = driver_a if gap > 0 else driver_b
+                notes.append(f"{who} brakes {abs(gap):.0f}m later")
+
+        if a['min_speed'] is not None and b['min_speed'] is not None:
+            gap = a['min_speed'] - b['min_speed']
+            if abs(gap) > 2:
+                who = driver_a if gap > 0 else driver_b
+                notes.append(f"{who} carries {abs(gap):.0f} km/h more "
+                             f"at the apex")
+
+        if a['throttle'] is not None and b['throttle'] is not None:
+            gap = a['throttle'] - b['throttle']
+            if abs(gap) > 5:
+                who = driver_b if gap > 0 else driver_a
+                notes.append(f"{who} gets on power {abs(gap):.0f}m earlier")
+
+        if a['exit_speed'] is not None and b['exit_speed'] is not None:
+            gap = a['exit_speed'] - b['exit_speed']
+            if abs(gap) > 2:
+                who = driver_a if gap > 0 else driver_b
+                notes.append(f"{who} exits {abs(gap):.0f} km/h faster")
+
+        findings.append({
+            'corner': int(corner['Number']),
+            'change': change,
+            'min_speed_a': a['min_speed'],
+            'min_speed_b': b['min_speed'],
+            'notes': notes,
+        })
+
+    # Optional chart: time change per corner, only the significant ones
+    if ax is not None or findings:
+        standalone = ax is None
+        if standalone:
+            fig, ax = plt.subplots(figsize=(13, 6))
+        else:
+            fig = ax.get_figure()
+            ax.axis('on')
+
+        numbers = [f['corner'] for f in findings]
+        changes = [f['change'] for f in findings]
+        colours = [style.DRIVER_B if c > 0 else style.DRIVER_A
+                   for c in changes]
+
+        ax.bar(range(len(numbers)), changes, color=colours)
+        ax.axhline(0, color=style.MUTED, linewidth=0.8)
+        ax.set_xticks(range(len(numbers)))
+        ax.set_xticklabels([f"T{n}" for n in numbers],
+                           fontsize=9 if standalone else 7)
+        ax.set_ylabel('Time change (s)', fontsize=10 if standalone else 8)
+        ax.tick_params(labelsize=9 if standalone else 7, pad=1)
+
+        if standalone:
+            style.title(fig, f"Technique — {driver_a} vs {driver_b}",
+                        f"{race} {year}  ·  corners where the gap exceeds "
+                        f"{threshold:.2f}s  ·  above zero = {driver_a} losing")
+            plt.tight_layout(rect=[0, 0, 1, 0.9])
+            display()
+        else:
+            ax.set_title(f"Technique — {driver_a} vs {driver_b}",
+                         color=style.TEXT, fontsize=11)
+
+    return {
+        'findings': findings,
+        'lap_a': int(lap_a['LapNumber']),
+        'lap_b': int(lap_b['LapNumber']),
+        'time_a': format_lap_time(lap_a['LapTime']),
+        'time_b': format_lap_time(lap_b['LapTime']),
+        'threshold': threshold,
+    }
+
 if __name__ == '__main__':
-    plot_speed_map(2024, 'Monza', 'NOR')
+    animate_sector_map(2024, 'Monza', 'NOR')
     plt.show()

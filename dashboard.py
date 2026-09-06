@@ -12,6 +12,7 @@ class Dashboard:
     def __init__(self, title="F1 Analysis"):
         self.fig = plt.figure(figsize=(19, 10))
         self.title = title
+        self.animation = None
 
         self.grid = GridSpec(3, 12, figure=self.fig,
                              hspace=0.45, wspace=0.7,
@@ -31,12 +32,20 @@ class Dashboard:
         style.title(self.fig, self.title)
 
     def clear(self):
-        """Blank every panel."""
+        """Stop any animation, then blank every panel."""
+        self.stop_animation()
         for ax in [self.main, self.main_info, self.strip] + self.side:
             ax.clear()
             ax.axis('off')
 
+    def stop_animation(self):
+        if self.animation is not None:
+            self.animation.event_source.stop()
+            self.animation = None
+
     def clear_panel(self, ax):
+        if ax is self.main:
+            self.stop_animation()
         ax.clear()
         ax.axis('off')
 
@@ -96,4 +105,3 @@ if __name__ == '__main__':
 
     board.show()
     plt.show()
-    
