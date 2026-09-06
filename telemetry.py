@@ -493,8 +493,13 @@ def plot_gap_to_leader(year, race, drivers=None, ax=None):
     else:
         ax.set_title(f"Gap to {winner}", color=style.TEXT, fontsize=11)
 
-def animate_head_to_head(year, race, driver_a, driver_b, frames=500, ax=None):
-    """Two fastest laps replayed together on the track map."""
+def animate_head_to_head(year, race, driver_a, driver_b, frames=500,
+                         ax=None, info_ax=None):
+    """Two fastest laps replayed together on the track map.
+
+    If info_ax is given, the live readout is drawn there instead of over
+    the track.
+    """
     lap_a, tel_a, session = get_lap_telemetry(year, race, driver_a)
     lap_b, tel_b, _ = get_lap_telemetry(year, race, driver_b)
 
@@ -527,10 +532,12 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500, ax=None):
     if standalone:
         draw_start_line(ax, tel_a)
         ax.set_xlim(tel_a['X'].min() - 8000, tel_a['X'].max() + 800)
+        ax.set_ylim(tel_a['Y'].min() - 800, tel_a['Y'].max() + 800)
     else:
-        ax.set_xlim(tel_a['X'].min() - 800, tel_a['X'].max() + 800)
+        margin = 400
+        ax.set_xlim(tel_a['X'].min() - margin, tel_a['X'].max() + margin)
+        ax.set_ylim(tel_a['Y'].min() - margin, tel_a['Y'].max() + margin)
 
-    ax.set_ylim(tel_a['Y'].min() - 800, tel_a['Y'].max() + 800)
     ax.set_aspect('equal')
     ax.axis('off')
 
@@ -539,7 +546,7 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500, ax=None):
     trail_b, = ax.plot([], [], linewidth=3, color=style.DRIVER_B,
                        alpha=0.5, zorder=2)
 
-    marker = 15 if standalone else 10
+    marker = 15 if standalone else 11
     car_b, = ax.plot([], [], 'o', markersize=marker, color=style.DRIVER_B,
                      markeredgecolor=style.BACKGROUND, markeredgewidth=2,
                      zorder=4)
@@ -547,19 +554,39 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500, ax=None):
                      markeredgecolor=style.BACKGROUND, markeredgewidth=2,
                      alpha=0.85, zorder=5)
 
-    text_size = 12 if standalone else 9
-    clock = ax.text(0.02, 0.97, '', transform=ax.transAxes,
-                    color=style.TEXT, fontsize=text_size + 1, va='top',
-                    family='monospace', zorder=6)
-    line_a = ax.text(0.02, 0.93, '', transform=ax.transAxes,
-                     color=style.DRIVER_A, fontsize=text_size, va='top',
-                     family='monospace', zorder=6)
-    line_b = ax.text(0.02, 0.90, '', transform=ax.transAxes,
-                     color=style.DRIVER_B, fontsize=text_size, va='top',
-                     family='monospace', zorder=6)
-    gap_text = ax.text(0.02, 0.86, '', transform=ax.transAxes,
-                       color=style.MUTED, fontsize=text_size, va='top',
-                       family='monospace', zorder=6)
+    # Readout goes in its own panel when one is provided
+    if info_ax is not None:
+        info_ax.clear()
+        info_ax.axis('off')
+        target = info_ax
+        text_x = 0.05
+        text_size = 14
+    else:
+        target = ax
+        text_x = 0.02 if standalone else 0.66
+        text_size = 12 if standalone else 10
+
+    clock = target.text(text_x, 0.92, '', transform=target.transAxes,
+                        color=style.TEXT, fontsize=text_size + 2, va='top',
+                        family='monospace', zorder=6)
+    line_a = target.text(text_x, 0.80, '', transform=target.transAxes,
+                         color=style.DRIVER_A, fontsize=text_size, va='top',
+                         family='monospace', zorder=6)
+    line_b = target.text(text_x, 0.72, '', transform=target.transAxes,
+                         color=style.DRIVER_B, fontsize=text_size, va='top',
+                         family='monospace', zorder=6)
+    gap_text = target.text(text_x, 0.60, '', transform=target.transAxes,
+                           color=style.MUTED, fontsize=text_size, va='top',
+                           family='monospace', zorder=6)
+
+    if info_ax is not None:
+        info_ax.text(text_x, 0.45,
+                     f"{driver_a} lap {int(lap_a['LapNumber'])}\n"
+                     f"  {format_lap_time(lap_a['LapTime'])}\n\n"
+                     f"{driver_b} lap {int(lap_b['LapNumber'])}\n"
+                     f"  {format_lap_time(lap_b['LapTime'])}",
+                     transform=info_ax.transAxes, color=style.MUTED,
+                     fontsize=11, va='top', family='monospace')
 
     if standalone:
         style.title(fig, f"{driver_a} vs {driver_b} — {race} {year}",
@@ -568,8 +595,8 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500, ax=None):
                     f"{driver_b} lap {int(lap_b['LapNumber'])} "
                     f"({format_lap_time(lap_b['LapTime'])})  ·  "
                     f"started together")
-    else:
-        ax.set_title(f"{driver_a} vs {driver_b}",
+    elif info_ax is None:
+        ax.set_title(f"{driver_a} vs {driver_b} — fastest laps",
                      color=style.TEXT, fontsize=11)
 
     def update(frame):
@@ -586,13 +613,13 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500, ax=None):
 
         gap = da[frame] - db[frame]
         leader = driver_a if gap > 0 else driver_b
-        gap_text.set_text(f"  {leader} ahead by {abs(gap):5.1f}m")
+        gap_text.set_text(f"{leader} ahead\nby {abs(gap):.1f}m")
 
         return (car_a, car_b, trail_a, trail_b,
                 clock, line_a, line_b, gap_text)
 
     animation = FuncAnimation(fig, update, frames=frames,
-                              interval=25, blit=standalone, repeat=True)
+                              interval=25, blit=False, repeat=True)
 
     fig._animation = animation
 
@@ -602,5 +629,5 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500, ax=None):
     return animation
 
 if __name__ == '__main__':
-    animate_head_to_head(2024, 'Monza', 'NOR', 'PIA')
+    plot_speed_map(2024, 'Monza', 'NOR')
     plt.show()
