@@ -98,6 +98,8 @@ def plot_lap(year, race, driver, lap_number=None, axes=None):
         fig, axes = plt.subplots(3, 1, figsize=(13, 8), sharex=True)
     else:
         fig = axes[0].get_figure()
+        for axis in axes:
+            axis.axis('on')
 
     axes[0].plot(tel['Distance'], tel['Speed'], color=style.DRIVER_A)
     axes[0].set_ylabel('Speed (km/h)')
@@ -136,6 +138,8 @@ def compare_laps(year, race, driver_a, driver_b, session_type='R', axes=None):
                                  gridspec_kw={'height_ratios': [2, 1]})
     else:
         fig = axes[0].get_figure()
+        for axis in axes:
+            axis.axis('on')
 
     max_distance = min(tel_a['Distance'].max(), tel_b['Distance'].max())
     grid = np.linspace(0, max_distance, 1000)
@@ -194,6 +198,7 @@ def corner_analysis(year, race, driver_a, driver_b, session_type='R', ax=None):
         fig, ax = plt.subplots(figsize=(13, 6))
     else:
         fig = ax.get_figure()
+        ax.axis('on')
 
     corners = session.get_circuit_info().corners
 
@@ -230,8 +235,10 @@ def corner_analysis(year, race, driver_a, driver_b, session_type='R', ax=None):
     ax.bar(range(len(numbers)), changes, color=colours)
     ax.axhline(0, color=style.MUTED, linewidth=0.8)
     ax.set_xticks(range(len(numbers)))
-    ax.set_xticklabels([f"T{n}" for n in numbers], fontsize=9)
-    ax.set_ylabel('Time change (s)')
+    ax.set_xticklabels([f"T{n}" for n in numbers],
+                       fontsize=9 if standalone else 6)
+    ax.set_ylabel('Time change (s)', fontsize=10 if standalone else 8)
+    ax.tick_params(labelsize=9 if standalone else 7, pad=1)
 
     worst = numbers[int(np.argmax(changes))] if changes else None
     best = numbers[int(np.argmin(changes))] if changes else None
@@ -280,11 +287,13 @@ def plot_speed_map(year, race, driver, lap_number=None, ax=None):
     ax.add_collection(collection)
 
     draw_corners(ax, session, fontsize=8 if standalone else 6)
+
+    margin = 600 if standalone else 300
     if standalone:
         draw_start_line(ax, tel)
 
-    ax.set_xlim(tel['X'].min() - 600, tel['X'].max() + 600)
-    ax.set_ylim(tel['Y'].min() - 600, tel['Y'].max() + 600)
+    ax.set_xlim(tel['X'].min() - margin, tel['X'].max() + margin)
+    ax.set_ylim(tel['Y'].min() - margin, tel['Y'].max() + margin)
     ax.set_aspect('equal')
     ax.axis('off')
 
@@ -328,11 +337,13 @@ def plot_gear_map(year, race, driver, lap_number=None, ax=None):
     ax.add_collection(collection)
 
     draw_corners(ax, session, fontsize=8 if standalone else 6)
+
+    margin = 600 if standalone else 300
     if standalone:
         draw_start_line(ax, tel)
 
-    ax.set_xlim(tel['X'].min() - 600, tel['X'].max() + 600)
-    ax.set_ylim(tel['Y'].min() - 600, tel['Y'].max() + 600)
+    ax.set_xlim(tel['X'].min() - margin, tel['X'].max() + margin)
+    ax.set_ylim(tel['Y'].min() - margin, tel['Y'].max() + margin)
     ax.set_aspect('equal')
     ax.axis('off')
 
@@ -361,6 +372,7 @@ def plot_strategy(year, race, ax=None):
         fig, ax = plt.subplots(figsize=(13, 9))
     else:
         fig = ax.get_figure()
+        ax.axis('on')
 
     ax.grid(False)
     used = set()
@@ -382,10 +394,11 @@ def plot_strategy(year, race, ax=None):
             start += length
 
     ax.set_yticks(range(len(order)))
-    ax.set_yticklabels(order, fontsize=10 if standalone else 7)
+    ax.set_yticklabels(order, fontsize=10 if standalone else 6)
     ax.invert_yaxis()
-    ax.set_xlabel('Lap')
+    ax.set_xlabel('Lap', fontsize=10 if standalone else 8)
     ax.set_xlim(0, None)
+    ax.tick_params(labelsize=9 if standalone else 6, pad=1)
     for spine in ax.spines.values():
         spine.set_visible(False)
 
@@ -412,6 +425,7 @@ def plot_positions(year, race, ax=None):
         fig, ax = plt.subplots(figsize=(13, 8))
     else:
         fig = ax.get_figure()
+        ax.axis('on')
 
     for driver in session.results['Abbreviation']:
         driver_laps = laps[laps['Driver'] == driver]
@@ -424,18 +438,18 @@ def plot_positions(year, race, ax=None):
         ax.plot(driver_laps['LapNumber'], driver_laps['Position'],
                 color=colour, linewidth=1.8 if standalone else 1.2)
 
-        if standalone:
-            final = driver_laps['Position'].dropna()
-            if len(final):
-                ax.annotate(driver, (driver_laps['LapNumber'].iloc[-1],
-                                     final.iloc[-1]),
-                            textcoords='offset points', xytext=(6, -3),
-                            color=colour, fontsize=9)
+        final = driver_laps['Position'].dropna()
+        if len(final):
+            ax.annotate(driver, (driver_laps['LapNumber'].iloc[-1],
+                                 final.iloc[-1]),
+                        textcoords='offset points', xytext=(4, -2),
+                        color=colour, fontsize=9 if standalone else 6)
 
     ax.invert_yaxis()
-    ax.set_xlabel('Lap')
-    ax.set_ylabel('Position')
-    ax.set_yticks(range(1, 21, 2))
+    ax.set_xlabel('Lap', fontsize=10 if standalone else 8)
+    ax.set_ylabel('Position', fontsize=10 if standalone else 8)
+    ax.set_yticks(range(1, 21, 2 if standalone else 4))
+    ax.tick_params(labelsize=9 if standalone else 7, pad=1)
 
     if standalone:
         style.title(fig, f"Race positions — {race} {year}",
@@ -458,6 +472,7 @@ def plot_gap_to_leader(year, race, drivers=None, ax=None):
         fig, ax = plt.subplots(figsize=(13, 8))
     else:
         fig = ax.get_figure()
+        ax.axis('on')
 
     winner = session.results['Abbreviation'].iloc[0]
     winner_laps = laps[laps['Driver'] == winner]
@@ -477,15 +492,22 @@ def plot_gap_to_leader(year, race, drivers=None, ax=None):
         team = driver_laps['Team'].iloc[0]
         colour = style.TEAM_COLOURS.get(team, style.MUTED)
         ax.plot(driver_laps['LapNumber'], gap, label=driver,
-                color=colour, linewidth=1.8 if standalone else 1.2)
+                color=colour, linewidth=1.8 if standalone else 1.4)
+
+        # Label the line end so each driver is identifiable
+        if len(gap):
+            ax.annotate(driver, (driver_laps['LapNumber'].iloc[-1], gap[-1]),
+                        textcoords='offset points', xytext=(4, -2),
+                        color=colour, fontsize=9 if standalone else 7)
 
     ax.axhline(0, color=style.MUTED, linewidth=0.8)
     ax.invert_yaxis()
-    ax.set_xlabel('Lap')
-    ax.set_ylabel(f'Gap to {winner} (s)')
-    ax.legend(loc='lower left', ncols=3, fontsize=9 if standalone else 7)
+    ax.set_xlabel('Lap', fontsize=10 if standalone else 8)
+    ax.set_ylabel(f'Gap to {winner} (s)', fontsize=10 if standalone else 8)
+    ax.tick_params(labelsize=9 if standalone else 7, pad=1)
 
     if standalone:
+        ax.legend(loc='lower left', ncols=3, fontsize=9)
         style.title(fig, f"Gap to leader — {race} {year}",
                     f"Cumulative time behind {winner}")
         plt.tight_layout(rect=[0, 0, 1, 0.92])
@@ -534,7 +556,7 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500,
         ax.set_xlim(tel_a['X'].min() - 8000, tel_a['X'].max() + 800)
         ax.set_ylim(tel_a['Y'].min() - 800, tel_a['Y'].max() + 800)
     else:
-        margin = 400
+        margin = 300
         ax.set_xlim(tel_a['X'].min() - margin, tel_a['X'].max() + margin)
         ax.set_ylim(tel_a['Y'].min() - margin, tel_a['Y'].max() + margin)
 
@@ -554,7 +576,6 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500,
                      markeredgecolor=style.BACKGROUND, markeredgewidth=2,
                      alpha=0.85, zorder=5)
 
-    # Readout goes in its own panel when one is provided
     if info_ax is not None:
         info_ax.clear()
         info_ax.axis('off')
@@ -580,7 +601,7 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500,
                            family='monospace', zorder=6)
 
     if info_ax is not None:
-        info_ax.text(text_x, 0.45,
+        info_ax.text(text_x, 0.42,
                      f"{driver_a} lap {int(lap_a['LapNumber'])}\n"
                      f"  {format_lap_time(lap_a['LapTime'])}\n\n"
                      f"{driver_b} lap {int(lap_b['LapNumber'])}\n"
@@ -619,7 +640,7 @@ def animate_head_to_head(year, race, driver_a, driver_b, frames=500,
                 clock, line_a, line_b, gap_text)
 
     animation = FuncAnimation(fig, update, frames=frames,
-                              interval=25, blit=False, repeat=True)
+                              interval=25, blit=True, repeat=True)
 
     fig._animation = animation
 

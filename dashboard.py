@@ -14,18 +14,18 @@ class Dashboard:
         self.title = title
 
         self.grid = GridSpec(3, 12, figure=self.fig,
-                             hspace=0.45, wspace=0.6,
-                             left=0.03, right=0.97,
-                             top=0.88, bottom=0.06)
+                             hspace=0.45, wspace=0.7,
+                             left=0.03, right=0.96,
+                             top=0.88, bottom=0.07)
 
-        # Main area splits into a timing panel and the track itself
+        # Left: timing readout. Middle: track. Right: side panels.
         self.main_info = self.fig.add_subplot(self.grid[0:2, 0:3])
-        self.main = self.fig.add_subplot(self.grid[0:2, 3:8])
-        self.strip = self.fig.add_subplot(self.grid[2, 0:8])
+        self.main = self.fig.add_subplot(self.grid[0:2, 3:7])
+        self.strip = self.fig.add_subplot(self.grid[2, 0:7])
         self.side = [
-            self.fig.add_subplot(self.grid[0, 8:12]),
-            self.fig.add_subplot(self.grid[1, 8:12]),
-            self.fig.add_subplot(self.grid[2, 8:12]),
+            self.fig.add_subplot(self.grid[0, 7:12]),
+            self.fig.add_subplot(self.grid[1, 7:12]),
+            self.fig.add_subplot(self.grid[2, 7:12]),
         ]
 
         self.clear()
