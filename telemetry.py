@@ -850,12 +850,15 @@ def corner_technique(year, race, driver_a, driver_b, session_type='R',
                      threshold=0.05, ax=None):
     """Compare two drivers corner by corner, and identify what differed.
 
-    For each corner where the time gap exceeds the threshold, reports the
-    four measurable inputs that explain most corner-level time loss:
+    For each corner (or chicane) where the time gap exceeds the threshold,
+    reports the four measurable inputs that explain most corner-level time:
       - braking point: distance at which the brake first goes on
       - minimum speed: apex speed
       - throttle point: distance at which throttle returns above 50%
-      - exit speed: speed 150m after the corner
+      - exit speed: speed 120-200m after the corner
+
+    Corners closer together than 150m are merged, since a chicane is one
+    braking event and measuring each half separately double-counts it.
 
     These are measurements, not explanations. The tool reports what
     differed; it cannot say why.
@@ -875,25 +878,23 @@ def corner_technique(year, race, driver_a, driver_b, session_type='R',
     delta = (np.interp(grid, tel_a['Distance'], elapsed(tel_a))
              - np.interp(grid, tel_b['Distance'], elapsed(tel_b)))
 
-    def corner_inputs(tel, corner_distance):
-        """Measure the four inputs around one corner."""
-        approach = tel[(tel['Distance'] > corner_distance - 350) &
-                       (tel['Distance'] < corner_distance + 50)]
-        through = tel[(tel['Distance'] > corner_distance - 120) &
-                      (tel['Distance'] < corner_distance + 120)]
-        after = tel[(tel['Distance'] > corner_distance) &
-                    (tel['Distance'] < corner_distance + 250)]
-        exit_zone = tel[(tel['Distance'] > corner_distance + 120) &
-                        (tel['Distance'] < corner_distance + 200)]
+    def corner_inputs(tel, start_distance, end_distance):
+        """Measure the four inputs around one corner or chicane."""
+        approach = tel[(tel['Distance'] > start_distance - 350) &
+                       (tel['Distance'] < start_distance + 30)]
+        through = tel[(tel['Distance'] > start_distance - 80) &
+                      (tel['Distance'] < end_distance + 80)]
+        after = tel[(tel['Distance'] > end_distance) &
+                    (tel['Distance'] < end_distance + 250)]
+        exit_zone = tel[(tel['Distance'] > end_distance + 120) &
+                        (tel['Distance'] < end_distance + 200)]
 
-        # First point on the brakes in the approach
         braking = approach[approach['Brake'] == True]
         brake_point = (float(braking['Distance'].iloc[0])
                        if len(braking) else None)
 
         minimum = float(through['Speed'].min()) if len(through) else None
 
-        # First point back above half throttle after the corner
         on_power = after[after['Throttle'] > 50]
         throttle_point = (float(on_power['Distance'].iloc[0])
                           if len(on_power) else None)
@@ -907,13 +908,29 @@ def corner_technique(year, race, driver_a, driver_b, session_type='R',
             'exit_speed': exit_speed,
         }
 
-    findings = []
-    previous_distance = 0
+    # Group corners that share a braking event
+    MERGE_DISTANCE = 150
+    corner_groups = []
 
     for _, corner in corners.iterrows():
         distance = corner['Distance']
         if distance > max_distance:
             continue
+        if corner_groups and distance - corner_groups[-1]['end'] < MERGE_DISTANCE:
+            corner_groups[-1]['numbers'].append(int(corner['Number']))
+            corner_groups[-1]['end'] = distance
+        else:
+            corner_groups.append({
+                'numbers': [int(corner['Number'])],
+                'start': distance,
+                'end': distance,
+            })
+
+    findings = []
+    previous_distance = 0
+
+    for group in corner_groups:
+        distance = group['end']
 
         before = np.interp(previous_distance, grid, delta)
         after_delta = np.interp(distance, grid, delta)
@@ -923,8 +940,8 @@ def corner_technique(year, race, driver_a, driver_b, session_type='R',
         if abs(change) < threshold:
             continue
 
-        a = corner_inputs(tel_a, distance)
-        b = corner_inputs(tel_b, distance)
+        a = corner_inputs(tel_a, group['start'], group['end'])
+        b = corner_inputs(tel_b, group['start'], group['end'])
 
         notes = []
 
@@ -954,44 +971,40 @@ def corner_technique(year, race, driver_a, driver_b, session_type='R',
                 notes.append(f"{who} exits {abs(gap):.0f} km/h faster")
 
         findings.append({
-            'corner': int(corner['Number']),
+            'corner': "T" + "/".join(str(n) for n in group['numbers']),
             'change': change,
             'min_speed_a': a['min_speed'],
             'min_speed_b': b['min_speed'],
             'notes': notes,
         })
+        
+    standalone = ax is None
+    if standalone:
+        fig, ax = plt.subplots(figsize=(13, 6))
+    else:
+        fig = ax.get_figure()
+        ax.axis('on')
 
-    # Optional chart: time change per corner, only the significant ones
-    if ax is not None or findings:
-        standalone = ax is None
-        if standalone:
-            fig, ax = plt.subplots(figsize=(13, 6))
-        else:
-            fig = ax.get_figure()
-            ax.axis('on')
+    labels = [f['corner'] for f in findings]
+    changes = [f['change'] for f in findings]
+    colours = [style.DRIVER_B if c > 0 else style.DRIVER_A for c in changes]
 
-        numbers = [f['corner'] for f in findings]
-        changes = [f['change'] for f in findings]
-        colours = [style.DRIVER_B if c > 0 else style.DRIVER_A
-                   for c in changes]
+    ax.bar(range(len(labels)), changes, color=colours)
+    ax.axhline(0, color=style.MUTED, linewidth=0.8)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, fontsize=9 if standalone else 7)
+    ax.set_ylabel('Time change (s)', fontsize=10 if standalone else 8)
+    ax.tick_params(labelsize=9 if standalone else 7, pad=1)
 
-        ax.bar(range(len(numbers)), changes, color=colours)
-        ax.axhline(0, color=style.MUTED, linewidth=0.8)
-        ax.set_xticks(range(len(numbers)))
-        ax.set_xticklabels([f"T{n}" for n in numbers],
-                           fontsize=9 if standalone else 7)
-        ax.set_ylabel('Time change (s)', fontsize=10 if standalone else 8)
-        ax.tick_params(labelsize=9 if standalone else 7, pad=1)
-
-        if standalone:
-            style.title(fig, f"Technique — {driver_a} vs {driver_b}",
-                        f"{race} {year}  ·  corners where the gap exceeds "
-                        f"{threshold:.2f}s  ·  above zero = {driver_a} losing")
-            plt.tight_layout(rect=[0, 0, 1, 0.9])
-            display()
-        else:
-            ax.set_title(f"Technique — {driver_a} vs {driver_b}",
-                         color=style.TEXT, fontsize=11)
+    if standalone:
+        style.title(fig, f"Technique — {driver_a} vs {driver_b}",
+                    f"{race} {year}  ·  corners where the gap exceeds "
+                    f"{threshold:.2f}s  ·  above zero = {driver_a} losing")
+        plt.tight_layout(rect=[0, 0, 1, 0.9])
+        display()
+    else:
+        ax.set_title(f"Technique — {driver_a} vs {driver_b}",
+                     color=style.TEXT, fontsize=11)
 
     return {
         'findings': findings,
@@ -1003,5 +1016,5 @@ def corner_technique(year, race, driver_a, driver_b, session_type='R',
     }
 
 if __name__ == '__main__':
-    animate_sector_map(2024, 'Monza', 'NOR')
+    corner_technique(2024, 'Monza', 'VER', 'NOR')
     plt.show()

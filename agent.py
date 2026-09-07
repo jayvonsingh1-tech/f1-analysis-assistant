@@ -20,8 +20,8 @@ fastf1.set_log_level(logging.WARNING)
 client = Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
 MODEL = "claude-haiku-4-5"
 
-FUEL_EFFECT = 0.03
-FUEL_START = 100.0
+FUEL_EFFECT = 0.03      # seconds per lap per kg of fuel
+FUEL_START = 100.0      # kg at race start (estimate)
 
 TRACK_STATUS = {
     '1': 'green',
@@ -54,7 +54,6 @@ def check_driver_ran(session, driver):
     row = session.results[session.results['Abbreviation'] == driver]
     if not row.empty:
         status = str(row['Status'].iloc[0]).strip()
-        # Very recent races have no status yet - don't treat that as a DNF
         if not status or status.lower() == 'nan':
             return None
         if status != 'Finished' and 'Lapped' not in status:
@@ -62,14 +61,6 @@ def check_driver_ran(session, driver):
                     f"completing {len(laps)} laps. Race-long analysis is "
                     f"incomplete and telemetry comparison may fail.")
     return None
-
-def session_drivers(year, race):
-    session = load_race(year, race)
-    lines = [f"{race} {year} - drivers"]
-    for _, row in session.results.iterrows():
-        lines.append(f"  {row['Abbreviation']} - {row['FullName']} "
-                     f"({row['TeamName']})")
-    return "\n".join(lines)
 
 def clean_laps(session, driver):
     laps = session.laps.pick_drivers(driver).copy()
@@ -135,87 +126,6 @@ def analyse_stints(year, race, driver):
 
     return "\n".join(lines)
 
-def sector_times(year, race, driver_a, driver_b=None):
-    session = load_race(year, race)
-
-    def best_sectors(driver):
-        laps = session.laps.pick_drivers(driver)
-        clean = laps[laps['Deleted'].fillna(False) == False]
-        return {
-            's1': clean['Sector1Time'].min(),
-            's2': clean['Sector2Time'].min(),
-            's3': clean['Sector3Time'].min(),
-            'best_lap': clean['LapTime'].min(),
-        }
-
-def show_sector_map(year, race, driver, panel='main'):
-    board = dashboard.get_board(f"{race} {year}")
-    ax = dashboard.panel_for(panel)
-    board.clear_panel(ax)
-
-    info = board.main_info if panel == 'main' else None
-    if info is not None:
-        board.clear_panel(info)
-
-    board.animation, data = telemetry.animate_sector_map(
-        year, race, driver, ax=ax, info_ax=info)
-    board.show()
-
-    lines = [f"Qualifying sector map for {driver}, {race} {year}, playing in "
-             f"the {panel} panel. Lap {data['lap_number']}, "
-             f"{data['lap_time']}."]
-    for sector in data['sectors']:
-        if sector['time'] is None:
-            lines.append(f"  S{sector['number']}: no time")
-            continue
-        lines.append(f"  S{sector['number']}: {sector['time']}s "
-                     f"({sector['status']}; session best "
-                     f"{sector['session_best']}s)")
-    return "\n".join(lines)
-
-def describe(driver, data):
-    parts = []
-    theoretical = 0
-    for key in ('s1', 's2', 's3'):
-        value = data[key]
-        if pd.isna(value):
-            parts.append(f"{key.upper()}: no time")
-            continue
-        seconds = value.total_seconds()
-        theoretical += seconds
-        parts.append(f"{key.upper()}: {seconds:.3f}s")
-
-    actual = data['best_lap']
-    actual_text = format_time(actual.total_seconds()) if not pd.isna(actual) else "none"
-
-    return (f"{driver} best sectors — " + ", ".join(parts) +
-            f"\n  theoretical best lap {format_time(theoretical)}, "
-            f"actual best {actual_text}")
-
-    lines = [f"{race} {year} - best sector times"]
-    a = best_sectors(driver_a)
-    lines.append(describe(driver_a, a))
-
-    if driver_b:
-        b = best_sectors(driver_b)
-        lines.append(describe(driver_b, b))
-
-        lines.append(f"\n{driver_a} vs {driver_b} by sector:")
-        for key in ('s1', 's2', 's3'):
-            if pd.isna(a[key]) or pd.isna(b[key]):
-                continue
-            gap = a[key].total_seconds() - b[key].total_seconds()
-            faster = driver_b if gap > 0 else driver_a
-            lines.append(f"  {key.upper()}: {faster} quicker by "
-                         f"{abs(gap):.3f}s")
-
-    lines.append("\nSectors are each driver's personal best in that sector "
-                 "across the race, possibly on different laps. The "
-                 "theoretical best is those three summed — a lap nobody "
-                 "actually drove.")
-
-    return "\n".join(lines)
-
 def compare(year, race, driver_a, driver_b):
     session = load_race(year, race)
 
@@ -259,6 +169,9 @@ def race_result(year, race):
         if np.isnan(position):
             continue
 
+        status = str(row['Status']).strip()
+        status_text = f" - {status}" if status and status.lower() != 'nan' else ""
+
         time_value = row['Time']
         if pd.isna(time_value):
             gap = ""
@@ -268,16 +181,25 @@ def race_result(year, race):
             gap = f" - +{time_value.total_seconds():.3f}s"
 
         lines.append(f"  {int(position)}. {row['Abbreviation']} "
-                     f"({row['FullName']}, {row['TeamName']}) - "
-                     f"{row['Status']}{gap}")
+                     f"({row['FullName']}, {row['TeamName']})"
+                     f"{status_text}{gap}")
 
+    statuses = results['Status'].astype(str).str.strip().str.lower()
+    known = statuses[(statuses != '') & (statuses != 'nan')]
     classified = int(results['Position'].notna().sum())
-    finished = int((results['Status'] == 'Finished').sum())
-    lapped = int(results['Status'].astype(str).str.contains('Lapped', na=False).sum())
-    retired = classified - finished - lapped
 
-    lines.append(f"\nSummary: {classified} classified, {finished} finished on "
-                 f"the lead lap, {lapped} lapped, {retired} did not finish")
+    if known.empty:
+        lines.append(f"\n{classified} drivers classified. Finishing status is "
+                     f"not yet available for this session — it usually appears "
+                     f"a day or two after the race. Do not assume anyone "
+                     f"retired.")
+    else:
+        finished = int((known == 'finished').sum())
+        lapped = int(known.str.contains('lapped', na=False).sum())
+        retired = classified - finished - lapped
+        lines.append(f"\nSummary: {classified} classified, {finished} finished "
+                     f"on the lead lap, {lapped} lapped, {retired} did not "
+                     f"finish")
 
     return "\n".join(lines)
 
@@ -319,6 +241,70 @@ def qualifying(year, race):
 
     return "\n".join(lines)
 
+def session_drivers(year, race):
+    session = load_race(year, race)
+    lines = [f"{race} {year} - drivers"]
+    for _, row in session.results.iterrows():
+        lines.append(f"  {row['Abbreviation']} - {row['FullName']} "
+                     f"({row['TeamName']})")
+    return "\n".join(lines)
+
+def sector_times(year, race, driver_a, driver_b=None):
+    session = load_race(year, race)
+
+    def best_sectors(driver):
+        laps = session.laps.pick_drivers(driver)
+        return {
+            's1': laps['Sector1Time'].min(),
+            's2': laps['Sector2Time'].min(),
+            's3': laps['Sector3Time'].min(),
+            'best_lap': laps['LapTime'].min(),
+        }
+
+    def describe(driver, data):
+        parts = []
+        theoretical = 0
+        for key in ('s1', 's2', 's3'):
+            value = data[key]
+            if pd.isna(value):
+                parts.append(f"{key.upper()}: no time")
+                continue
+            seconds = value.total_seconds()
+            theoretical += seconds
+            parts.append(f"{key.upper()}: {seconds:.3f}s")
+
+        actual = data['best_lap']
+        actual_text = (format_time(actual.total_seconds())
+                       if not pd.isna(actual) else "none")
+
+        return (f"{driver} best sectors — " + ", ".join(parts) +
+                f"\n  theoretical best lap {format_time(theoretical)}, "
+                f"actual best {actual_text}")
+
+    lines = [f"{race} {year} - best sector times"]
+    a = best_sectors(driver_a)
+    lines.append(describe(driver_a, a))
+
+    if driver_b:
+        b = best_sectors(driver_b)
+        lines.append(describe(driver_b, b))
+
+        lines.append(f"\n{driver_a} vs {driver_b} by sector:")
+        for key in ('s1', 's2', 's3'):
+            if pd.isna(a[key]) or pd.isna(b[key]):
+                continue
+            gap = a[key].total_seconds() - b[key].total_seconds()
+            faster = driver_b if gap > 0 else driver_a
+            lines.append(f"  {key.upper()}: {faster} quicker by "
+                         f"{abs(gap):.3f}s")
+
+    lines.append("\nSectors are each driver's personal best in that sector "
+                 "across the session, possibly on different laps. The "
+                 "theoretical best is those three summed — a lap nobody "
+                 "actually drove.")
+
+    return "\n".join(lines)
+
 def season_calendar(year):
     schedule = fastf1.get_event_schedule(year)
     today = pd.Timestamp(date.today())
@@ -356,7 +342,8 @@ def race_events(year, race):
         lambda values: values.mode().iloc[0] if len(values.mode()) else '1')
 
     def describe(code):
-        found = [name for digit, name in TRACK_STATUS.items() if digit in str(code)]
+        found = [name for digit, name in TRACK_STATUS.items()
+                 if digit in str(code)]
         return ", ".join(found) if found else f"status {code}"
 
     disrupted = [(int(lap), describe(status))
@@ -438,6 +425,8 @@ def race_events(year, race):
 
     return "\n".join(lines)
 
+# --- Visual tools ---------------------------------------------------------
+
 def _corner_lines(result, driver_a, driver_b, race, year, panel):
     faster = driver_a if result['time_a'] < result['time_b'] else driver_b
     lines = [f"Displayed in the {panel} panel, {race} {year}. "
@@ -445,17 +434,21 @@ def _corner_lines(result, driver_a, driver_b, race, year, panel):
              f"{driver_b} lap {result['lap_b']} ({result['time_b']}). "
              f"{faster} set the quicker of the two laps. "
              f"These are each driver's single fastest race lap, not averages.",
-             f"Per corner (positive = {driver_a} losing), with minimum "
-             f"speed through that corner:"]
+             "Per corner, with minimum speed through that corner:"]
+
     for number, change, speed in zip(result['corners'], result['changes'],
                                      result['speeds']):
+        gainer = driver_b if change > 0 else driver_a
         speed_text = f", {speed:.0f} km/h min" if speed else ""
-        lines.append(f"  T{number}: {change:+.3f}s{speed_text}")
-    lines.append(f"Largest loss for {driver_a} at T{result['worst']}, "
-                 f"largest gain at T{result['best']}.")
+        lines.append(f"  T{number}: {gainer} gains {abs(change):.3f}s"
+                     f"{speed_text}")
+
+    lines.append(f"Largest single loss for {driver_a} at T{result['worst']}, "
+                 f"largest single gain at T{result['best']}.")
     return "\n".join(lines)
 
-def show_head_to_head(year, race, driver_a, driver_b, panel='main'):
+def show_head_to_head(year, race, driver_a, driver_b, panel=None):
+    panel = dashboard.resolve_panel(panel, 'main')
     board = dashboard.get_board(f"{race} {year}")
     ax = dashboard.panel_for(panel)
     board.clear_panel(ax)
@@ -464,11 +457,9 @@ def show_head_to_head(year, race, driver_a, driver_b, panel='main'):
     if info is not None:
         board.clear_panel(info)
 
-    # Corner chart first - drawing after the animation starts breaks blitting
     side3 = dashboard.panel_for('side3')
     board.clear_panel(side3)
-    result = telemetry.corner_analysis(year, race, driver_a, driver_b,
-                                       ax=side3)
+    result = telemetry.corner_analysis(year, race, driver_a, driver_b, ax=side3)
 
     board.animation = telemetry.animate_head_to_head(
         year, race, driver_a, driver_b, ax=ax, info_ax=info)
@@ -477,7 +468,8 @@ def show_head_to_head(year, race, driver_a, driver_b, panel='main'):
     return ("Animation playing. Corner deltas shown in side3.\n"
             + _corner_lines(result, driver_a, driver_b, race, year, panel))
 
-def show_corner_analysis(year, race, driver_a, driver_b, panel='side3'):
+def show_corner_analysis(year, race, driver_a, driver_b, panel=None):
+    panel = dashboard.resolve_panel(panel, 'side3')
     board = dashboard.get_board(f"{race} {year}")
     ax = dashboard.panel_for(panel)
     board.clear_panel(ax)
@@ -485,98 +477,8 @@ def show_corner_analysis(year, race, driver_a, driver_b, panel='side3'):
     board.show()
     return _corner_lines(result, driver_a, driver_b, race, year, panel)
 
-def show_speed_map(year, race, driver, panel='main'):
-    board = dashboard.get_board(f"{race} {year}")
-    ax = dashboard.panel_for(panel)
-    board.clear_panel(ax)
-    telemetry.plot_speed_map(year, race, driver, ax=ax)
-    board.show()
-
-    lap, tel, session = telemetry.get_lap_telemetry(year, race, driver)
-    slowest = tel.loc[tel['Speed'].idxmin()]
-
-    return (f"Speed map for {driver}, {race} {year}, lap "
-            f"{int(lap['LapNumber'])} ({telemetry.format_lap_time(lap['LapTime'])}), "
-            f"shown in the {panel} panel. Track coloured by speed with corner "
-            f"numbers marked.\n"
-            f"  Top speed {tel['Speed'].max():.0f} km/h\n"
-            f"  Slowest point {tel['Speed'].min():.0f} km/h at "
-            f"{slowest['Distance']:.0f}m into the lap\n"
-            f"  Average speed {tel['Speed'].mean():.0f} km/h\n"
-            f"  Full throttle for {(tel['Throttle'] > 95).mean() * 100:.0f}% "
-            f"of the lap, on the brakes for "
-            f"{tel['Brake'].mean() * 100:.0f}%")
-
-def show_gear_map(year, race, driver, panel='main'):
-    board = dashboard.get_board(f"{race} {year}")
-    ax = dashboard.panel_for(panel)
-    board.clear_panel(ax)
-    telemetry.plot_gear_map(year, race, driver, ax=ax)
-    board.show()
-
-    lap, tel, session = telemetry.get_lap_telemetry(year, race, driver)
-    gears = tel['nGear'].dropna().astype(int)
-    counts = gears.value_counts().sort_index()
-
-    lines = [f"Gear map for {driver}, {race} {year}, lap "
-             f"{int(lap['LapNumber'])}, shown in the {panel} panel.",
-             f"  Highest gear {gears.max()}, lowest {gears.min()}",
-             f"  Time in each gear:"]
-    for gear, count in counts.items():
-        share = count / len(gears) * 100
-        lines.append(f"    {gear}: {share:.0f}%")
-    return "\n".join(lines)
-
-def circuit_info(year, race):
-    session = load_race(year, race)
-    info = session.get_circuit_info()
-    corners = info.corners
-
-    lines = [f"{race} {year} - circuit layout",
-             f"  {len(corners)} numbered corners"]
-
-    for _, corner in corners.iterrows():
-        letter = str(corner.get('Letter', '')).strip()
-        label = f"{int(corner['Number'])}{letter}"
-        lines.append(f"  Turn {label} at {corner['Distance']:.0f}m")
-
-    if hasattr(info, 'marshal_sectors') and len(info.marshal_sectors):
-        lines.append(f"  {len(info.marshal_sectors)} marshal sectors")
-
-    lines.append("\nCorner names are not in this data. Refer to corners by "
-                 "number only.")
-
-    return "\n".join(lines)
-
-
-def show_strategy(year, race, panel='side1'):
-    board = dashboard.get_board(f"{race} {year}")
-    ax = dashboard.panel_for(panel)
-    board.clear_panel(ax)
-    telemetry.plot_strategy(year, race, ax=ax)
-    board.show()
-    return (f"Tyre strategy for {race} {year} shown in the {panel} panel. "
-            f"This tool returns no numeric data.")
-
-def show_positions(year, race, panel='side2'):
-    board = dashboard.get_board(f"{race} {year}")
-    ax = dashboard.panel_for(panel)
-    board.clear_panel(ax)
-    telemetry.plot_positions(year, race, ax=ax)
-    board.show()
-    return (f"Position changes for {race} {year} shown in the {panel} panel. "
-            f"This tool returns no numeric data.")
-
-def show_gap_to_leader(year, race, panel='strip'):
-    board = dashboard.get_board(f"{race} {year}")
-    ax = dashboard.panel_for(panel)
-    board.clear_panel(ax)
-    telemetry.plot_gap_to_leader(year, race, ax=ax)
-    board.show()
-    return (f"Gap to leader for {race} {year} shown in the {panel} panel, "
-            f"top six finishers. This tool returns no numeric data.")
-
-def show_corner_technique(year, race, driver_a, driver_b, panel='side3'):
+def show_corner_technique(year, race, driver_a, driver_b, panel=None):
+    panel = dashboard.resolve_panel(panel, 'side3')
     board = dashboard.get_board(f"{race} {year}")
     ax = dashboard.panel_for(panel)
     board.clear_panel(ax)
@@ -587,15 +489,16 @@ def show_corner_technique(year, race, driver_a, driver_b, panel='side3'):
              f"{driver_a} lap {result['lap_a']} ({result['time_a']}) vs "
              f"{driver_b} lap {result['lap_b']} ({result['time_b']}). "
              f"Chart in the {panel} panel.",
-             f"Corners where the gap exceeds {result['threshold']}s "
-             f"(positive = {driver_a} losing):"]
+             f"Corners where the gap exceeds {result['threshold']}s:"]
 
     if not result['findings']:
         lines.append("  No corner exceeded the threshold — the laps were "
                      "very evenly matched.")
     else:
         for finding in result['findings']:
-            lines.append(f"  T{finding['corner']}: {finding['change']:+.3f}s")
+            gainer = driver_b if finding['change'] > 0 else driver_a
+            lines.append(f"  {finding['corner']}: {gainer} gains "
+                         f"{abs(finding['change']):.3f}s")
             if finding['min_speed_a'] and finding['min_speed_b']:
                 lines.append(f"    apex speeds: {driver_a} "
                              f"{finding['min_speed_a']:.0f}, {driver_b} "
@@ -613,6 +516,106 @@ def show_corner_technique(year, race, driver_a, driver_b, panel='side3'):
 
     return "\n".join(lines)
 
+def show_sector_map(year, race, driver, panel=None):
+    panel = dashboard.resolve_panel(panel, 'main')
+    board = dashboard.get_board(f"{race} {year}")
+    ax = dashboard.panel_for(panel)
+    board.clear_panel(ax)
+
+    info = board.main_info if panel == 'main' else None
+    if info is not None:
+        board.clear_panel(info)
+
+    board.animation, data = telemetry.animate_sector_map(
+        year, race, driver, ax=ax, info_ax=info)
+    board.show()
+
+    lines = [f"Qualifying sector map for {driver}, {race} {year}, playing in "
+             f"the {panel} panel. Lap {data['lap_number']}, "
+             f"{data['lap_time']}."]
+    for sector in data['sectors']:
+        if sector['time'] is None:
+            lines.append(f"  S{sector['number']}: no time")
+            continue
+        lines.append(f"  S{sector['number']}: {sector['time']}s "
+                     f"({sector['status']}; session best "
+                     f"{sector['session_best']}s)")
+    return "\n".join(lines)
+
+def show_speed_map(year, race, driver, panel=None):
+    panel = dashboard.resolve_panel(panel, 'main')
+    board = dashboard.get_board(f"{race} {year}")
+    ax = dashboard.panel_for(panel)
+    board.clear_panel(ax)
+    telemetry.plot_speed_map(year, race, driver, ax=ax)
+    board.show()
+
+    lap, tel, session = telemetry.get_lap_telemetry(year, race, driver)
+    slowest = tel.loc[tel['Speed'].idxmin()]
+
+    return (f"Speed map for {driver}, {race} {year}, lap "
+            f"{int(lap['LapNumber'])} "
+            f"({telemetry.format_lap_time(lap['LapTime'])}), shown in the "
+            f"{panel} panel.\n"
+            f"  Top speed {tel['Speed'].max():.0f} km/h\n"
+            f"  Slowest point {tel['Speed'].min():.0f} km/h at "
+            f"{slowest['Distance']:.0f}m into the lap\n"
+            f"  Average speed {tel['Speed'].mean():.0f} km/h\n"
+            f"  Full throttle for {(tel['Throttle'] > 95).mean() * 100:.0f}% "
+            f"of the lap, on the brakes for {tel['Brake'].mean() * 100:.0f}%")
+
+def show_gear_map(year, race, driver, panel=None):
+    panel = dashboard.resolve_panel(panel, 'main')
+    board = dashboard.get_board(f"{race} {year}")
+    ax = dashboard.panel_for(panel)
+    board.clear_panel(ax)
+    telemetry.plot_gear_map(year, race, driver, ax=ax)
+    board.show()
+
+    lap, tel, session = telemetry.get_lap_telemetry(year, race, driver)
+    gears = tel['nGear'].dropna().astype(int)
+    counts = gears.value_counts().sort_index()
+
+    lines = [f"Gear map for {driver}, {race} {year}, lap "
+             f"{int(lap['LapNumber'])}, shown in the {panel} panel.",
+             f"  Highest gear {gears.max()}, lowest {gears.min()}",
+             f"  Time in each gear:"]
+    for gear, count in counts.items():
+        lines.append(f"    {gear}: {count / len(gears) * 100:.0f}%")
+    return "\n".join(lines)
+
+def show_strategy(year, race, panel=None):
+    panel = dashboard.resolve_panel(panel, 'side1')
+    board = dashboard.get_board(f"{race} {year}")
+    ax = dashboard.panel_for(panel)
+    board.clear_panel(ax)
+    telemetry.plot_strategy(year, race, ax=ax)
+    board.show()
+    return (f"Tyre strategy for {race} {year} shown in the {panel} panel. "
+            f"This tool returns no numeric data — call analyse_stints for "
+            f"stint lengths and compounds.")
+
+def show_positions(year, race, panel=None):
+    panel = dashboard.resolve_panel(panel, 'side2')
+    board = dashboard.get_board(f"{race} {year}")
+    ax = dashboard.panel_for(panel)
+    board.clear_panel(ax)
+    telemetry.plot_positions(year, race, ax=ax)
+    board.show()
+    return (f"Position changes for {race} {year} shown in the {panel} panel. "
+            f"This tool returns no numeric data — call race_result for "
+            f"finishing order.")
+
+def show_gap_to_leader(year, race, panel=None):
+    panel = dashboard.resolve_panel(panel, 'strip')
+    board = dashboard.get_board(f"{race} {year}")
+    ax = dashboard.panel_for(panel)
+    board.clear_panel(ax)
+    telemetry.plot_gap_to_leader(year, race, ax=ax)
+    board.show()
+    return (f"Gap to leader for {race} {year} shown in the {panel} panel, "
+            f"top six finishers. This tool returns no numeric data.")
+
 def clear_dashboard():
     dashboard.reset()
     return "Dashboard cleared, all panels blank."
@@ -623,21 +626,90 @@ def close_visuals():
 
 PANEL_PROPERTY = {
     "type": "string",
-    "description": ("Where to display it: main, side1, side2, side3 or strip. "
-                    "Optional - each visual has a sensible default."),
+    "description": ("Only pass this if the user explicitly asked for a "
+                    "specific panel: main, side1, side2, side3 or strip. "
+                    "Otherwise omit it and the dashboard will place the "
+                    "visual sensibly."),
 }
 
 TOOLS = [
-        {
+    {
+        "name": "analyse_stints",
+        "description": (
+            "Stint-by-stint breakdown for one driver: number of stints, total "
+            "laps, and for each stint the tyre compound, length, average pace "
+            "and fuel-corrected degradation trend on green-flag laps. Does "
+            "NOT return finishing position or gaps to other drivers."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+                "driver": {"type": "string", "description": "Three-letter code"},
+            },
+            "required": ["year", "race", "driver"],
+        },
+    },
+    {
+        "name": "compare",
+        "description": (
+            "Compare two drivers across a race: both stint breakdowns plus "
+            "median pace, best lap and pit stop counts, and who was quicker "
+            "on average. Does NOT return finishing positions or the gap at "
+            "the flag."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+                "driver_a": {"type": "string", "description": "First driver code"},
+                "driver_b": {"type": "string", "description": "Second driver code"},
+            },
+            "required": ["year", "race", "driver_a", "driver_b"],
+        },
+    },
+    {
+        "name": "race_result",
+        "description": (
+            "Finishing order: positions, codes and full names, teams, status, "
+            "the winner's race time and each driver's gap to the winner, plus "
+            "summary counts. The only tool that returns finishing gaps."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+            },
+            "required": ["year", "race"],
+        },
+    },
+    {
+        "name": "qualifying",
+        "description": (
+            "Qualifying results: grid order, codes and full names, each "
+            "driver's best qualifying lap and gap to pole."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+            },
+            "required": ["year", "race"],
+        },
+    },
+    {
         "name": "sector_times",
         "description": (
-            "Get each driver's personal best sector times across a race or "
-            "session, their theoretical best lap (the three best sectors "
-            "summed), and their actual best lap. Pass driver_b to compare two "
-            "drivers sector by sector. Use when the user asks about sectors, "
-            "which part of the lap someone was strong in, or how much time a "
-            "driver left on the table. Note the theoretical best is a lap "
-            "nobody actually drove."
+            "Each driver's personal best sector times across a session, their "
+            "theoretical best lap (the three best sectors summed) and their "
+            "actual best lap. Pass driver_b to compare two drivers sector by "
+            "sector. Use when the user asks about sectors, which part of the "
+            "lap someone was strong in, or how much time they left on the "
+            "table. The theoretical best is a lap nobody actually drove."
         ),
         "input_schema": {
             "type": "object",
@@ -654,87 +726,11 @@ TOOLS = [
         },
     },
     {
-        "name": "analyse_stints",
+        "name": "session_drivers",
         "description": (
-            "Get a stint-by-stint breakdown for one driver in one race. "
-            "Returns the number of stints, total laps completed, and for each "
-            "stint: tyre compound, stint length, average pace and the "
-            "fuel-corrected degradation trend, computed on green-flag laps "
-            "only. Does NOT return finishing position or gaps to other "
-            "drivers. Use when the user asks about a single driver's race, "
-            "their tyre strategy, or how their pace changed."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "year": {"type": "integer", "description": "Season year"},
-                "race": {"type": "string", "description": "Circuit name"},
-                "driver": {"type": "string", "description": "Three-letter code"},
-            },
-            "required": ["year", "race", "driver"],
-        },
-    },
-    {
-        "name": "compare",
-        "description": (
-            "Compare two drivers in the same race. Returns both drivers' stint "
-            "breakdowns plus median pace, best lap and pit stop counts, and "
-            "identifies who was quicker on average lap time. Does NOT return "
-            "finishing positions or the gap at the flag."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "year": {"type": "integer", "description": "Season year"},
-                "race": {"type": "string", "description": "Circuit name"},
-                "driver_a": {"type": "string", "description": "First driver code"},
-                "driver_b": {"type": "string", "description": "Second driver code"},
-            },
-            "required": ["year", "race", "driver_a", "driver_b"],
-        },
-    },
-    {
-        "name": "race_result",
-        "description": (
-            "Get the finishing order: positions, driver codes and full names, "
-            "teams, status, the winner's race time, each driver's gap to the "
-            "winner, and summary counts. This is the only tool that returns "
-            "finishing gaps."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "year": {"type": "integer", "description": "Season year"},
-                "race": {"type": "string", "description": "Circuit name"},
-            },
-            "required": ["year", "race"],
-        },
-    },
-        {
-        "name": "show_sector_map",
-        "description": (
-            "Display an animation of a driver's fastest qualifying lap, with "
-            "each sector of the track colouring in as they complete it — "
-            "purple for session best, green for personal best, yellow for "
-            "slower. Use whenever the user asks about a driver's qualifying "
-            "lap or qualifying pace. Returns no numeric data."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "year": {"type": "integer", "description": "Season year"},
-                "race": {"type": "string", "description": "Circuit name"},
-                "driver": {"type": "string", "description": "Three-letter code"},
-                "panel": PANEL_PROPERTY,
-            },
-            "required": ["year", "race", "driver"],
-        },
-    },
-    {
-        "name": "qualifying",
-        "description": (
-            "Get qualifying results: grid order, driver codes and full names, "
-            "best qualifying lap and gap to pole."
+            "List every driver in a race with their three-letter code, full "
+            "name and team. Use whenever you are not certain of a code — "
+            "never guess one."
         ),
         "input_schema": {
             "type": "object",
@@ -748,8 +744,8 @@ TOOLS = [
     {
         "name": "season_calendar",
         "description": (
-            "List every round in a season with dates and whether it has "
-            "happened. Use to resolve vague references like 'the last race'."
+            "Every round in a season with dates and whether it has happened. "
+            "Use to resolve vague references like 'the last race'."
         ),
         "input_schema": {
             "type": "object",
@@ -762,9 +758,9 @@ TOOLS = [
     {
         "name": "race_events",
         "description": (
-            "Get what happened during a race: safety cars, VSC, flags, weather, "
-            "and the significant race control messages. Use when the user asks "
-            "what happened, or when stint data looks anomalous."
+            "What happened during a race: safety cars, VSC, flags, weather, "
+            "and the significant race control messages. Use when the user "
+            "asks what happened, or when stint data looks anomalous."
         ),
         "input_schema": {
             "type": "object",
@@ -778,9 +774,9 @@ TOOLS = [
     {
         "name": "show_head_to_head",
         "description": (
-            "Display an animation of two drivers' fastest laps replayed on the "
-            "track, AND return corner-by-corner time differences. Defaults to "
-            "the main panel with corner deltas in side3."
+            "Animation of two drivers' fastest laps replayed together on the "
+            "track, plus corner-by-corner time differences. Use when the user "
+            "asks to see two drivers compared on a lap."
         ),
         "input_schema": {
             "type": "object",
@@ -797,9 +793,9 @@ TOOLS = [
     {
         "name": "show_corner_analysis",
         "description": (
-            "Display a chart AND return the numbers: how much time one driver "
-            "gains or loses at each corner on their fastest laps, with corner "
-            "minimum speeds. The only tool giving corner-level differences."
+            "Chart and numbers: how much time one driver gains or loses to "
+            "another at each corner on their fastest laps, with corner "
+            "minimum speeds."
         ),
         "input_schema": {
             "type": "object",
@@ -814,10 +810,53 @@ TOOLS = [
         },
     },
     {
+        "name": "show_corner_technique",
+        "description": (
+            "The most detailed comparison available. For each corner where "
+            "two drivers' times differ meaningfully, measures braking point, "
+            "apex speed, where throttle is reapplied and exit speed. Use "
+            "whenever the user asks WHY a driver is losing time, what they "
+            "could do better, or how one driver's technique differs from "
+            "another's. The only tool that explains a time difference rather "
+            "than just measuring it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+                "driver_a": {"type": "string", "description": "Driver being assessed"},
+                "driver_b": {"type": "string", "description": "Reference driver"},
+                "panel": PANEL_PROPERTY,
+            },
+            "required": ["year", "race", "driver_a", "driver_b"],
+        },
+    },
+    {
+        "name": "show_sector_map",
+        "description": (
+            "Animation of a driver's fastest qualifying lap, each sector "
+            "colouring in as they complete it — purple for session best, "
+            "green for personal best, yellow for slower. Returns the sector "
+            "times too. Use for any question about a qualifying lap."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year": {"type": "integer", "description": "Season year"},
+                "race": {"type": "string", "description": "Circuit name"},
+                "driver": {"type": "string", "description": "Three-letter code"},
+                "panel": PANEL_PROPERTY,
+            },
+            "required": ["year", "race", "driver"],
+        },
+    },
+    {
         "name": "show_speed_map",
         "description": (
-            "Display the circuit coloured by speed for one driver's fastest "
-            "lap, with corner numbers. Returns no lap data."
+            "Circuit coloured by speed for one driver's fastest lap, with "
+            "corner numbers. Returns top speed, slowest point, average speed "
+            "and full-throttle percentage."
         ),
         "input_schema": {
             "type": "object",
@@ -833,8 +872,8 @@ TOOLS = [
     {
         "name": "show_gear_map",
         "description": (
-            "Display the circuit coloured by gear selection for one driver's "
-            "fastest lap. Returns no lap data."
+            "Circuit coloured by gear selection for one driver's fastest lap. "
+            "Returns the percentage of the lap spent in each gear."
         ),
         "input_schema": {
             "type": "object",
@@ -850,8 +889,8 @@ TOOLS = [
     {
         "name": "show_strategy",
         "description": (
-            "Display every driver's tyre stints as coloured bars. Returns no "
-            "numeric data."
+            "Every driver's tyre stints as coloured bars across the race. "
+            "Returns no numeric data."
         ),
         "input_schema": {
             "type": "object",
@@ -866,8 +905,8 @@ TOOLS = [
     {
         "name": "show_positions",
         "description": (
-            "Display every driver's track position lap by lap. Returns no "
-            "numeric data."
+            "Every driver's track position lap by lap. Returns no numeric "
+            "data."
         ),
         "input_schema": {
             "type": "object",
@@ -882,8 +921,8 @@ TOOLS = [
     {
         "name": "show_gap_to_leader",
         "description": (
-            "Display the cumulative gap to the winner for the top six "
-            "finishers. Returns no numeric data."
+            "Cumulative time gap to the winner for the top six finishers. "
+            "Returns no numeric data."
         ),
         "input_schema": {
             "type": "object",
@@ -898,8 +937,8 @@ TOOLS = [
     {
         "name": "clear_dashboard",
         "description": (
-            "Blank every panel on the dashboard. Use when the user asks to "
-            "clear it, start fresh, or see only one thing."
+            "Blank every panel. Use when the user asks to clear the "
+            "dashboard, start fresh, or see only one thing."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -908,46 +947,6 @@ TOOLS = [
         "description": "Close the dashboard window entirely.",
         "input_schema": {"type": "object", "properties": {}},
     },
-        {
-        "name": "session_drivers",
-        "description": (
-            "List every driver in a race with their three-letter code, full "
-            "name and team. Use this whenever you are not certain of a "
-            "driver's code — never guess a code."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "year": {"type": "integer", "description": "Season year"},
-                "race": {"type": "string", "description": "Circuit name"},
-            },
-            "required": ["year", "race"],
-        },
-    },
-        {
-        "name": "show_corner_technique",
-        "description": (
-            "The most detailed comparison available. For each corner where "
-            "two drivers' times differ meaningfully, measures and reports the "
-            "four inputs that explain corner-level time: braking point, apex "
-            "speed, where throttle is reapplied, and exit speed. Use whenever "
-            "the user asks WHY a driver is losing time, what they could do "
-            "better, or how one driver's technique differs from another's. "
-            "This is the only tool that explains a time difference rather "
-            "than just measuring it."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "year": {"type": "integer", "description": "Season year"},
-                "race": {"type": "string", "description": "Circuit name"},
-                "driver_a": {"type": "string", "description": "The driver being assessed"},
-                "driver_b": {"type": "string", "description": "The reference driver"},
-                "panel": PANEL_PROPERTY,
-            },
-            "required": ["year", "race", "driver_a", "driver_b"],
-        },
-    },
 ]
 
 FUNCTIONS = {
@@ -955,10 +954,14 @@ FUNCTIONS = {
     'compare': compare,
     'race_result': race_result,
     'qualifying': qualifying,
+    'sector_times': sector_times,
+    'session_drivers': session_drivers,
     'season_calendar': season_calendar,
     'race_events': race_events,
     'show_head_to_head': show_head_to_head,
     'show_corner_analysis': show_corner_analysis,
+    'show_corner_technique': show_corner_technique,
+    'show_sector_map': show_sector_map,
     'show_speed_map': show_speed_map,
     'show_gear_map': show_gear_map,
     'show_strategy': show_strategy,
@@ -966,8 +969,6 @@ FUNCTIONS = {
     'show_gap_to_leader': show_gap_to_leader,
     'clear_dashboard': clear_dashboard,
     'close_visuals': close_visuals,
-   'session_drivers': session_drivers,
-       'show_sector_map': show_sector_map,
 }
 
 SYSTEM_PROMPT = """You are an F1 race engineer's analysis assistant.
@@ -978,8 +979,12 @@ Visuals are not optional and you never need to be asked:
 - Qualifying lap or qualifying pace → show_sector_map
 - Any comparison of two drivers → show_head_to_head
 - Where time is gained or lost on track → show_corner_analysis
-Call these before answering. If the user asks for a specific panel, pass it.
-If they want to see only one thing, call clear_dashboard first.
+- Why a driver is slower, or what they could do better → show_corner_technique
+
+Call these before answering. Do not pass the panel argument unless the user
+explicitly asks for a specific panel — the dashboard places visuals sensibly
+on its own. If the user wants to see only one thing, call clear_dashboard
+first.
 
 Panels: main (large, centre-left, with a readout beside it), side1, side2 and
 side3 down the right, strip along the bottom.
@@ -995,12 +1000,18 @@ The tools provide the numbers that matter.
 You cannot see the visuals you display. Never describe corner exits, driving
 style, racing lines or how a lap looked.
 
+If no tool provides what the user asked for, say so. Never substitute a
+different visual and describe it as if it were the one requested.
+
+Never name a corner. You have corner numbers from the tools; use those.
+Corner names from your own knowledge are frequently wrong.
+
 If unsure of a driver's three-letter code, call session_drivers. Never guess.
 Use names exactly as the tools give them.
 
-Your training data ends before today, so never refuse a request because a date
-looks like the future — call the tool and report what comes back. For vague
-references like "the last race", call season_calendar.
+Your training data ends before today, so never refuse a request because a
+date looks like the future — call the tool and report what comes back. For
+vague references like "the last race", call season_calendar.
 
 ## Reading the data
 
@@ -1012,12 +1023,15 @@ car, red flag or rain usually accounts for it.
 
 ## Interpretation
 
-Report what happened and how big it was. Don't attribute causes the data can't
-show, and don't call a performance excellent or well managed — a degradation
-number can't support that.
+Report what happened and how big it was. Don't attribute causes the data
+can't show, and don't call a performance excellent or well managed — a
+degradation number can't support that.
 
 "His hards were flat across eighteen laps, so no real drop-off there" is good.
 "Excellent tyre management on the hards" invents a cause.
+
+Don't generalise from one lap to a driver's overall style. Eleven corners on
+a single lap is not evidence of how someone drives.
 
 If the user explicitly asks for your opinion or what someone should have done
 differently, give a real one: start from the numbers, say it's your reading,
@@ -1028,8 +1042,8 @@ replace the answer.
 ## Voice
 
 Speak like an engineer talking to a colleague. Full sentences, no bullet
-points, no tables or markdown — your output may be read aloud. Under about 100
-words unless more is asked for.
+points, no tables or markdown — your output may be read aloud. Under about
+100 words unless more is asked for.
 
 Numbers as figures: 0.026s/lap, not "zero point zero two six". Seconds are
 seconds, never basis points or percentages.
@@ -1037,23 +1051,9 @@ seconds, never basis points or percentages.
 Use proper terminology — undercut, overcut, thermal degradation, graining,
 dirty air, traction zone, tyre working range, delta.
 
-If no tool provides what the user asked for, say so. Never substitute a
-different visual and describe it as if it were the one requested.
-
-Never name a corner. You have corner numbers from the tools; use those. Corner
-names from your own knowledge are frequently wrong.
-
-## Explaining time loss
-
-When the user asks why a driver is slower, what they could do better, or how
-to improve, call show_corner_technique. It measures braking points, apex
-speeds, throttle application and exit speeds.
-
-Report what the measurements show. "He brakes 12m earlier and carries 6 km/h
-less at the apex" is a finding. "He lacks confidence on the brakes" is not —
-you cannot see confidence, downforce level, tyre state or fuel load. When the
-user asks for advice, frame it as what the numbers point at, and name the
-things you cannot see that might explain them instead.
+Apex speed tells you what kind of corner it is. Under about 120 km/h is slow,
+120-200 medium, above 200 fast. Don't describe a corner's character from
+memory — read the speed the tool gave you.
 
 You can answer general F1 and engineering questions from your own knowledge.
 If a question is ambiguous, ask."""

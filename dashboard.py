@@ -60,6 +60,22 @@ class Dashboard:
 
 _board = None
 
+def resolve_panel(requested, default):
+    """Decide which panel to use.
+
+    If the caller named one, use it. If not, put the first visual in main
+    and later ones in their default slot.
+    """
+    if requested:
+        return requested
+
+    board = get_board()
+    occupied = any(
+        len(ax.lines) or len(ax.patches) or len(ax.collections) or len(ax.images)
+        for ax in [board.main] + board.side + [board.strip]
+    )
+    return default if occupied else 'main'
+
 def get_board(title=None):
     """Return the shared dashboard, creating or recreating it if needed."""
     global _board
