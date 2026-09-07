@@ -312,6 +312,7 @@ def animate_race(data, speed=10, ax=None, info_ax=None, start_lap=None):
 
     return animation
 
+
 if __name__ == '__main__':
     data = race_positions(2024, 'Monza')
     animate_race(data, speed=15)
