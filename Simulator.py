@@ -15,8 +15,7 @@ MODEL ASSUMPTIONS AND LIMITATIONS
 This is a point mass with two refinements: load-sensitive tyres, and a
 driven-axle limit on acceleration. Not modelled:
   - explicit weight transfer between individual wheels
-  - aerodynamic balance shifting with ride height, and its effect on
-    understeer and oversteer
+  - aerodynamic balance shifting with ride height
   - a torque curve and gear ratios; power is a single figure
   - tyre temperature, wear, camber and track surface
   - elevation change, banking and kerbs
@@ -25,20 +24,17 @@ Grip sharing between cornering and acceleration uses a friction ellipse,
 which assumes the same peak grip laterally and longitudinally.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
+from scipy.optimize import minimize
 
 GRAVITY = 9.81
 AIR_DENSITY = 1.225      # kg/m3 at sea level, 15C
 
 @dataclass
 class Car:
-    """Everything the point-mass simulation needs to know about a car.
-
-    Aero coefficients are given as coefficient x area (ClA, CdA), which is
-    how they are usually quoted, so no separate frontal area is needed.
-    """
+    """Everything the point-mass simulation needs to know about a car."""
     name: str
     mass: float              # kg, including driver and fuel
     power: float             # W, at the wheels
@@ -52,24 +48,20 @@ class Car:
     drs_cda_delta: float = 0.0       # drag reduction when DRS is open
 
     def downforce(self, speed):
-        """Aerodynamic downforce in newtons at a given speed (m/s)."""
         return 0.5 * AIR_DENSITY * self.cla * speed ** 2
 
     def drag(self, speed, drs=False):
-        """Aerodynamic drag in newtons at a given speed (m/s)."""
         cda = self.cda - (self.drs_cda_delta if drs else 0.0)
         return 0.5 * AIR_DENSITY * cda * speed ** 2
 
     def normal_load(self, speed):
-        """Total vertical load: weight plus downforce."""
         return self.mass * GRAVITY + self.downforce(speed)
 
     def effective_mu(self, speed):
         """Friction coefficient at the load this speed produces.
 
         Real tyres lose grip as vertical load rises. Modelled as a power
-        law: mu = mu0 * (F/F_ref)^-k, with load per tyre taken as the
-        total normal load divided by four.
+        law: mu = mu0 * (F/F_ref)^-k.
         """
         if self.load_sensitivity <= 0:
             return self.mu
@@ -79,36 +71,31 @@ class Car:
         return self.mu * ratio ** (-self.load_sensitivity)
 
     def grip_force(self, speed):
-        """Maximum horizontal force all four tyres can produce."""
         return self.effective_mu(speed) * self.normal_load(speed)
 
-# 2024-spec F1 car. Mass, power and top speed are anchored to known
-# figures; mu, load sensitivity and drive fraction are fitted.
+# 2024-spec F1 car. Mass and power are anchored to known figures;
+# the rest are starting points for fitting.
 F1_2024 = Car(
     name="F1 2024",
-    mass=850.0,          # 798kg minimum plus part-race fuel
-    power=760_000.0,     # ~1020hp at the wheels
+    mass=850.0,
+    power=760_000.0,
     cla=4.5,
-    cda=1.48,            # fitted to match 339 km/h top speed
+    cda=1.48,
     mu=1.75,
     brake_limit=6.0,
     load_sensitivity=0.15,
-    reference_load=2100.0,   # roughly the static load per tyre
-    drive_fraction=0.55,     # rear axle share under acceleration
+    reference_load=2100.0,
+    drive_fraction=0.55,
     drs_cda_delta=0.30,
 )
 
 @dataclass
 class Track:
-    """Geometry of a line round a circuit, at even spacing.
-
-    Deliberately independent of where the geometry came from: a driven
-    telemetry line now, a computed racing line later.
-    """
+    """Geometry of a line round a circuit, at even spacing."""
     name: str
-    distance: np.ndarray     # metres from the start, evenly spaced
-    curvature: np.ndarray    # 1/m at each point
-    source: str              # how this geometry was derived
+    distance: np.ndarray
+    curvature: np.ndarray
+    source: str
 
     @property
     def radius(self):
@@ -129,9 +116,9 @@ class LapResult:
     """Output of a simulation run."""
     track: Track
     car: Car
-    speed: np.ndarray        # m/s at each track point
-    lap_time: float          # seconds
-    limit: np.ndarray        # 'corner', 'power' or 'brake' at each point
+    speed: np.ndarray
+    lap_time: float
+    limit: np.ndarray
 
     @property
     def speed_kph(self):
@@ -141,10 +128,8 @@ def track_from_telemetry(x, y, name="unknown", spacing=2.0,
                          smoothing_window=15, scale=0.1):
     """Build a Track from a driven telemetry line.
 
-    Resamples to even spacing before smoothing. Telemetry points are dense
-    in slow corners and sparse on straights, so smoothing raw samples
-    treats the two very differently; resampling first makes the filter
-    uniform along the track.
+    Resamples to even spacing before smoothing, so the filter spans a
+    consistent length of track everywhere.
     """
     x = np.asarray(x, dtype=float) * scale
     y = np.asarray(y, dtype=float) * scale
@@ -185,10 +170,8 @@ def track_from_telemetry(x, y, name="unknown", spacing=2.0,
 def cornering_limit(track, car, iterations=25):
     """Maximum speed at each point, set by lateral grip.
 
-    With load-sensitive tyres, mu depends on downforce which depends on
-    speed, so the balance is implicit. Solved by damped fixed-point
-    iteration: guess a speed, compute the grip at that speed, find the
-    speed that grip supports, repeat until it settles.
+    With load-sensitive tyres mu depends on speed, so the balance is
+    implicit. Solved by damped fixed-point iteration.
     """
     radius = track.radius
     finite = np.isfinite(radius) & (radius > 0)
@@ -212,10 +195,8 @@ def cornering_limit(track, car, iterations=25):
 def available_longitudinal(car, speed, curvature, braking=False):
     """Longitudinal acceleration available, in m/s2.
 
-    The tyres have one grip budget shared between cornering and
-    accelerating or braking. Using a friction ellipse: if a fraction f of
-    the grip is committed laterally, sqrt(1 - f^2) remains for
-    longitudinal use.
+    One grip budget shared between cornering and accelerating or braking,
+    via a friction ellipse.
     """
     grip = car.grip_force(speed)
 
@@ -226,33 +207,23 @@ def available_longitudinal(car, speed, curvature, braking=False):
     drag = car.drag(speed)
 
     if braking:
-        # All four tyres brake, and drag helps.
         tyre_limit = grip * remaining
         mechanical_limit = car.brake_limit * car.mass * GRAVITY
         force = np.minimum(tyre_limit, mechanical_limit) + drag
         return force / car.mass
 
-    # Only the driven axle puts power down. Weight transfer under
-    # acceleration loads the rear, so it carries rather more than half.
+    # Only the driven axle puts power down.
     traction_limit = grip * remaining * car.drive_fraction
     power_limit = car.power / np.maximum(speed, 1.0)
     force = np.minimum(traction_limit, power_limit) - drag
     return force / car.mass
 
 def _terminal_speed(car):
-    """Top speed where power equals drag: P = 0.5 * rho * CdA * v^3."""
+    """Top speed where power equals drag."""
     return (car.power / (0.5 * AIR_DENSITY * car.cda)) ** (1 / 3)
 
 def simulate(track, car, initial_speed=None):
-    """Run a quasi-steady-state lap simulation.
-
-    Three passes:
-      1. Cornering limit at every point from lateral grip
-      2. Forward from the start under acceleration limits
-      3. Backward from the end under braking limits
-
-    The speed the car can carry is the lowest of the three.
-    """
+    """Run a quasi-steady-state lap simulation."""
     step = track.step
     curvature = track.curvature
     points = len(track.distance)
@@ -291,6 +262,61 @@ def simulate(track, car, initial_speed=None):
     return LapResult(track=track, car=car, speed=speed,
                      lap_time=lap_time, limit=limit)
 
+def fit_car(track, actual_speed_kph, actual_lap_time, base_car,
+            fit=('cda', 'cla', 'mu', 'load_sensitivity', 'drive_fraction'),
+            bounds=None, verbose=True):
+    """Fit car parameters so the simulation matches a real lap.
+
+    Fits against the whole speed trace rather than just lap time. A single
+    lap time can be produced by many different parameter sets; thousands of
+    speed samples constrain the fit far more tightly.
+    """
+    default_bounds = {
+        'cda': (0.8, 2.2),
+        'cla': (2.5, 7.0),
+        'mu': (1.0, 2.5),
+        'load_sensitivity': (0.0, 0.4),
+        'drive_fraction': (0.4, 1.0),
+        'brake_limit': (3.0, 8.0),
+        'mass': (700.0, 950.0),
+        'power': (500_000.0, 900_000.0),
+    }
+    bounds = bounds or default_bounds
+
+    start = [getattr(base_car, name) for name in fit]
+    limits = [bounds[name] for name in fit]
+
+    actual_ms = np.asarray(actual_speed_kph, dtype=float) / 3.6
+
+    def build(values):
+        return replace(base_car, **dict(zip(fit, values)))
+
+    def error(values):
+        car = build(values)
+        try:
+            result = simulate(track, car)
+        except Exception:
+            return 1e6
+
+        speed_error = np.sqrt(np.mean(
+            ((result.speed - actual_ms) / np.maximum(actual_ms, 1.0)) ** 2))
+        time_error = abs(result.lap_time - actual_lap_time) / actual_lap_time
+
+        return speed_error + 2.0 * time_error
+
+    outcome = minimize(error, start, bounds=limits, method='L-BFGS-B',
+                       options={'maxiter': 200})
+
+    fitted = build(outcome.x)
+
+    if verbose:
+        print(f"\nFitted parameters ({outcome.nit} iterations):")
+        for name, value in zip(fit, outcome.x):
+            print(f"  {name}: {getattr(base_car, name):.3f} -> {value:.3f}")
+        print(f"  final error: {outcome.fun:.4f}")
+
+    return fitted, outcome
+
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
 
@@ -307,53 +333,43 @@ if __name__ == '__main__':
     print(f"Lap length: {track.length:.0f}m at {track.step:.1f}m spacing")
     print(f"Tightest radius: {track.radius.min():.0f}m")
 
-    result = simulate(track, F1_2024)
-
     actual = lap['LapTime'].total_seconds()
-    error = result.lap_time - actual
+    real_speed_kph = np.interp(track.distance, tel['Distance'], tel['Speed'])
 
-    print(f"\nSimulated: {result.lap_time:.3f}s")
-    print(f"Actual:    {actual:.3f}s")
-    print(f"Error:     {error:+.3f}s ({error / actual * 100:+.1f}%)")
-    print(f"Top speed: {result.speed_kph.max():.0f} km/h "
+    result = simulate(track, F1_2024)
+    print(f"\nBefore fitting: {result.lap_time:.3f}s "
+          f"({result.lap_time - actual:+.3f}s), "
+          f"top speed {result.speed_kph.max():.0f} km/h")
+
+    fitted, outcome = fit_car(track, real_speed_kph, actual, F1_2024)
+    fitted_result = simulate(track, fitted)
+
+    print(f"\nAfter fitting: {fitted_result.lap_time:.3f}s "
+          f"({fitted_result.lap_time - actual:+.3f}s), "
+          f"top speed {fitted_result.speed_kph.max():.0f} km/h "
           f"vs actual {tel['Speed'].max():.0f} km/h")
 
-    sim_pace = result.lap_time / track.length
-    real_pace = actual / OFFICIAL_LENGTH
-    print(f"\nScaled to official length: "
-          f"{sim_pace * OFFICIAL_LENGTH:.3f}s "
-          f"({sim_pace * OFFICIAL_LENGTH - actual:+.3f}s)")
+    real_ms = real_speed_kph / 3.6
+    real_accel = np.gradient(real_ms) * real_ms / track.step
+    sim_accel = np.gradient(fitted_result.speed) * fitted_result.speed / track.step
 
-    real_speed = np.interp(track.distance, tel['Distance'],
-                           tel['Speed']) / 3.6
-    real_accel = np.gradient(real_speed) * real_speed / track.step
-    sim_accel = np.gradient(result.speed) * result.speed / track.step
-
-    print(f"\nAcceleration (m/s2):")
-    print(f"  Real peak accelerating:  {np.nanmax(real_accel):.1f} "
-          f"({np.nanmax(real_accel) / GRAVITY:.1f}g)")
-    print(f"  Sim  peak accelerating:  {np.nanmax(sim_accel):.1f} "
-          f"({np.nanmax(sim_accel) / GRAVITY:.1f}g)")
-    print(f"  Real peak braking:      {np.nanmin(real_accel):.1f} "
-          f"({np.nanmin(real_accel) / GRAVITY:.1f}g)")
-    print(f"  Sim  peak braking:      {np.nanmin(sim_accel):.1f} "
-          f"({np.nanmin(sim_accel) / GRAVITY:.1f}g)")
-
-    print(f"\nEffective mu:")
-    for v in (30, 60, 90):
-        print(f"  at {v * 3.6:.0f} km/h: {F1_2024.effective_mu(v):.3f}")
+    print(f"\nAcceleration after fitting:")
+    print(f"  accelerating: sim {np.nanmax(sim_accel) / GRAVITY:.1f}g "
+          f"vs real {np.nanmax(real_accel) / GRAVITY:.1f}g")
+    print(f"  braking:      sim {np.nanmin(sim_accel) / GRAVITY:.1f}g "
+          f"vs real {np.nanmin(real_accel) / GRAVITY:.1f}g")
 
     fig, ax = plt.subplots(figsize=(13, 6))
     ax.plot(tel['Distance'], tel['Speed'], color=style.DRIVER_A,
             label='Actual', linewidth=1.5)
-    ax.plot(track.distance, result.speed_kph, color=style.DRIVER_B,
-            label='Simulated', linewidth=1.5)
+    ax.plot(track.distance, fitted_result.speed_kph, color=style.DRIVER_B,
+            label='Simulated (fitted)', linewidth=1.5)
     ax.set_xlabel('Distance (m)')
     ax.set_ylabel('Speed (km/h)')
     ax.legend()
 
     style.title(fig, f"Lap simulation — {track.name}",
-                f"Simulated {result.lap_time:.3f}s vs actual "
-                f"{actual:.3f}s  ·  {error:+.3f}s")
+                f"Fitted {fitted_result.lap_time:.3f}s vs actual "
+                f"{actual:.3f}s  ·  {fitted_result.lap_time - actual:+.3f}s")
     plt.tight_layout(rect=[0, 0, 1, 0.9])
     plt.show()
