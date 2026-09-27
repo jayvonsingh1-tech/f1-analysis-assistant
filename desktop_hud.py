@@ -808,16 +808,14 @@ def set_wallpaper(path):
         log('Windows refused to set the wallpaper')
 
 def install():
-    """Task Scheduler job that redraws the wallpaper every REFRESH_MINUTES."""
-    pythonw = Path(sys.executable).with_name('pythonw.exe')   # runs with no console window
-    exe = pythonw if pythonw.exists() else Path(sys.executable)
-    command = f'"{exe}" "{Path(__file__).resolve()}"'
-    subprocess.run(['schtasks', '/Create', '/TN', TASK_NAME, '/TR', command,
-                    '/SC', 'MINUTE', '/MO', str(REFRESH_MINUTES), '/F'], check=True)
+    """Task Scheduler job that redraws every REFRESH_MINUTES, on battery too."""
+    from lockscreen import register_task       # shared helper, lives next to this file
+    register_task(TASK_NAME, __file__, REFRESH_MINUTES)
     log(f"installed '{TASK_NAME}', redrawing every {REFRESH_MINUTES} minutes")
 
 def uninstall():
-    subprocess.run(['schtasks', '/Delete', '/TN', TASK_NAME, '/F'], check=True)
+    from lockscreen import unregister_task
+    unregister_task(TASK_NAME)
     log(f"removed '{TASK_NAME}'")
 
 # --- Entry points ------------------------------------------------------------
