@@ -57,6 +57,17 @@ Always check implied lateral acceleration (v^2 * curvature) before
 fitting. Anything well above 6g is noise, and the fit will bend the car
 parameters to compensate for it.
 
+SPEED AND POSITION CLOCKS
+
+FastF1 gets speed and position as two separate streams, each with its
+own time stamps. If one clock runs a quarter of a second behind the
+other, the real speed trace sits 20m out of place at speed. Every
+braking point then looks early or late, and the fit bends the tyre grip
+and the drive fraction to explain it. Tested on made-up laps with a
+known car: a quarter of a second moved the fitted grip by 8 to 10% and
+the drive fraction by 0.13 to 0.3. build_reference() measures the offset
+on every lap, and corrects it when the laps agree.
+
 FITTING
 
 Fitting a single circuit is underdetermined - many parameter sets produce
@@ -691,11 +702,22 @@ def simulate(track, car, initial_speed=None, periodic=False):
 
 @dataclass
 class Reference:
-    """One real lap to fit against."""
+    """One real lap to fit against.
+
+    lap_time is the time the real car took along the fitted line, worked
+    out from its speed at each point. That is the fair target for a
+    simulation along the same line. The fitted line is a little shorter
+    than the distance the car really covered, so lap_time comes out
+    slightly under the timed lap, which is kept in official_time.
+    """
     track: Track
     speed_kph: np.ndarray    # real speed at each of track.distance
-    lap_time: float          # actual, seconds
+    lap_time: float          # seconds along this line at the real speed
     drag_limited: bool = True    # does the car reach terminal speed here?
+    official_time: float = None  # the timed lap, seconds
+    stream_offset: float = None  # seconds the speed clock was corrected by
+    clock: str = ""              # what was found about the two clocks
+    notes: list = field(default_factory=list)   # problems found in the data
 
 def lap_error(track, car, reference):
     """One number for how far a simulated lap is from the real one.
@@ -891,13 +913,122 @@ def fit_multi(references, base_car,
 
     return shared_values, cars, outcome
 
+def _stream_offset(pos_time, x, y, car_time, speed_kph, scale=0.1,
+                   reach=1.0, window=2.0, longest_gap=1.0):
+    """How far the speed data's clock is from the position data's.
+
+    FastF1 gets speed and position as two separate streams, each with
+    its own time stamps, and nothing guarantees the two clocks agree. A
+    quarter of a second is 20m at speed, enough to put every braking
+    point in the wrong place.
+
+    Both streams say how far the car went in any stretch of time: the
+    positions directly, the speed trace by adding up speed x time. With
+    the clocks apart, the two disagree wherever the car is gaining or
+    losing speed. This slides the speed trace in time until they agree
+    best over every stretch of `window` seconds, and returns the shift:
+    the speed that belongs with a position stamped t is the one stamped
+    t + shift. Returns None if it cannot tell.
+
+    Distances over a couple of seconds are compared, not speeds between
+    neighbouring samples, because a small error in one time stamp badly
+    upsets a speed worked out across a quarter of a second, and hardly
+    touches a distance covered in two.
+
+    reach: seconds, the largest shift looked for either way
+    longest_gap: seconds. Stretches with a longer hole in either stream
+        are left out.
+    """
+    pos_time = np.asarray(pos_time, dtype=float)
+    x = np.asarray(x, dtype=float) * scale
+    y = np.asarray(y, dtype=float) * scale
+    keep = np.isfinite(pos_time) & np.isfinite(x) & np.isfinite(y)
+    order = np.argsort(pos_time[keep], kind='stable')
+    pos_time, x, y = pos_time[keep][order], x[keep][order], y[keep][order]
+
+    car_time = np.asarray(car_time, dtype=float)
+    speed = np.asarray(speed_kph, dtype=float) / 3.6
+    keep = np.isfinite(car_time) & np.isfinite(speed)
+    order = np.argsort(car_time[keep], kind='stable')
+    car_time, speed = car_time[keep][order], speed[keep][order]
+
+    if len(pos_time) < 50 or len(car_time) < 50:
+        return None
+
+    # Distance covered since the first sample, according to each stream
+    path = np.concatenate(
+        [[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+    covered = np.concatenate(
+        [[0.0], np.cumsum(0.5 * (speed[1:] + speed[:-1])
+                          * np.diff(car_time))])
+
+    def holes_before(time):
+        """How many long gaps a stream has before each of its samples."""
+        return np.concatenate(
+            [[0], np.cumsum(np.diff(time) > longest_gap)])
+
+    # One stretch per position sample: from it to the sample about
+    # `window` seconds later. The partner is found by counting samples,
+    # not by reading the clock, so that errors in the time stamps have
+    # no say in which samples are compared. The speed data has to cover
+    # the stretch with `reach` to spare at both ends.
+    ahead = max(int(round(window / np.median(np.diff(pos_time)))), 1)
+    first = np.arange(len(pos_time) - ahead)
+    last = first + ahead
+
+    low = np.searchsorted(car_time, pos_time[first] - reach,
+                          side='right') - 1
+    high = np.searchsorted(car_time, pos_time[last] + reach, side='left')
+    usable = (low >= 0) & (high < len(car_time))
+    first, last, low, high = (first[usable], last[usable],
+                              low[usable], high[usable])
+
+    pos_holes, car_holes = holes_before(pos_time), holes_before(car_time)
+    usable = ((pos_holes[last] == pos_holes[first])
+              & (car_holes[high] == car_holes[low]))
+    first, last = first[usable], last[usable]
+    if len(first) < 50 or covered[-1] <= 0:
+        return None
+
+    travelled = path[last] - path[first]
+
+    shifts = np.arange(-reach, reach + 1e-9, 0.01)
+    miss = []
+    for shift in shifts:
+        predicted = (np.interp(pos_time[last] + shift, car_time, covered)
+                     - np.interp(pos_time[first] + shift, car_time,
+                                 covered))
+        # A speed sensor reading slightly high or low would look like a
+        # clock offset, so the speed trace is allowed one scale factor
+        factor = np.sum(predicted * travelled) / np.sum(predicted ** 2)
+        miss.append(np.mean((travelled - factor * predicted) ** 2))
+
+    best = int(np.argmin(miss))
+    if best in (0, len(shifts) - 1) or not np.isfinite(miss[best]):
+        return None
+
+    # Good data agrees to within a few percent of the distance covered.
+    # If even the best shift leaves the two far apart, they are not
+    # describing the same lap, and no shift means anything.
+    if math.sqrt(miss[best]) > 0.15 * np.mean(travelled):
+        return None
+
+    # A parabola through the lowest three points finds the minimum
+    # between the 0.01s steps
+    before, lowest, after = miss[best - 1:best + 2]
+    bend = before - 2.0 * lowest + after
+    if bend <= 0:
+        return float(shifts[best])
+    return float(shifts[best] + 0.005 * (before - after) / bend)
+
 def build_reference(year, race, driver, spacing=1.0, lam=None,
                     max_laps=20, drag_limited=True):
     """Load a driver's laps and prepare a reference for fitting.
 
     Geometry is pooled from up to max_laps clean laps on the same compound
-    as the fastest lap, so the lines are comparable. Speed and lap time
-    come from the fastest lap alone.
+    as the fastest lap, so the lines are comparable. Speed comes from the
+    fastest lap alone, with its clock lined up with the position data's
+    first (see _stream_offset).
     """
     import telemetry
 
@@ -907,9 +1038,37 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
     if fastest is None:
         raise ValueError(f"{driver} has no clean laps at {race} {year}.")
 
+    def seconds(column):
+        return column.dt.total_seconds().to_numpy()
+
+    def clock_offset(lap, pos):
+        """The speed clock's offset measured on one lap, or None."""
+        try:
+            car = lap.get_car_data()
+            return _stream_offset(seconds(pos['SessionTime']), pos['X'],
+                                  pos['Y'], seconds(car['SessionTime']),
+                                  car['Speed'])
+        except Exception:
+            return None
+
+    def longest_gap(times):
+        """Longest wait between two samples, in seconds."""
+        return float(np.max(np.diff(times))) if len(times) > 1 else 0.0
+
     # The fastest lap goes first, because it is the alignment reference
     fastest_pos = fastest.get_pos_data()
     positions = [(fastest_pos['X'].to_numpy(), fastest_pos['Y'].to_numpy())]
+    own_offset = clock_offset(fastest, fastest_pos)
+    offsets = [own_offset]
+
+    # Samples normally arrive four or five times a second. A long hole
+    # in the fastest lap means part of it is guesswork.
+    notes = []
+    pos_time = seconds(fastest_pos['SessionTime'])
+    if longest_gap(pos_time) > 1.0:
+        notes.append(f"the fastest lap has a {longest_gap(pos_time):.1f}s "
+                     f"hole in its position data, so the line there is "
+                     f"a guess")
 
     same_compound = laps[laps['Compound'] == fastest['Compound']]
     for _, lap in same_compound.iterlaps():
@@ -924,15 +1083,80 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
         if pos is None or len(pos) < 50:
             continue
         positions.append((pos['X'].to_numpy(), pos['Y'].to_numpy()))
+        offsets.append(clock_offset(lap, pos))
 
-    tel = fastest.get_telemetry()
+    # Every lap gives its own measurement of the clock offset. Laps of
+    # one session should agree, so the correction is only made when
+    # they do, and it uses the middle value so one odd lap cannot move
+    # it. The spread is the range the middle half of the laps fall in.
+    offsets = np.array([value for value in offsets if value is not None])
+    stream_offset = None
+    if len(offsets) < 3:
+        clock = ("speed and position clocks could not be compared: "
+                 "not corrected")
+    else:
+        quarter, three_quarters = np.percentile(offsets, [25, 75])
+        spread = three_quarters - quarter
+        if spread >= 0.05:
+            own = ("not measured" if own_offset is None
+                   else f"{own_offset:+.2f}s")
+            clock = (f"speed and position clocks are {offsets.min():+.2f}s "
+                     f"to {offsets.max():+.2f}s apart depending on the lap "
+                     f"(fastest lap {own}): not corrected")
+        else:
+            stream_offset = float(np.median(offsets))
+            if abs(stream_offset) < 0.005:
+                clock = "speed and position clocks agree"
+            else:
+                side = "later" if stream_offset > 0 else "earlier"
+                clock = (f"speed is time-stamped {abs(stream_offset):.2f}s "
+                         f"{side} than position (laps agree within "
+                         f"{spread:.2f}s): corrected")
+
+    speed_line = None
+    if stream_offset is not None:
+        # Keep every speed sample exactly as measured, and place each at
+        # the position the car had at that moment, read between the
+        # position samples either side
+        try:
+            car = fastest.get_car_data(pad=5, pad_side='both')
+            car_time = seconds(car['SessionTime']) - stream_offset
+            inside = (car_time >= pos_time[0]) & (car_time <= pos_time[-1])
+            if inside.sum() < 50:
+                raise ValueError("too little speed data")
+            speed_line = (
+                np.interp(car_time[inside], pos_time, fastest_pos['X']),
+                np.interp(car_time[inside], pos_time, fastest_pos['Y']),
+                car['Speed'].to_numpy()[inside])
+            if longest_gap(car_time[inside]) > 1.0:
+                notes.append(f"the fastest lap has a "
+                             f"{longest_gap(car_time[inside]):.1f}s hole "
+                             f"in its speed data, so the real speed "
+                             f"there is a guess")
+        except Exception:
+            speed_line = stream_offset = None
+            clock = ("the fastest lap's speed data could not be read on "
+                     "its own: clocks not corrected")
+
+    if speed_line is None:
+        # Fall back to FastF1's own merge of the two streams
+        tel = fastest.get_telemetry()
+        speed_line = (tel['X'], tel['Y'], tel['Speed'])
+
     track = track_from_laps(positions, name=race, spacing=spacing, lam=lam,
-                            speed_line=(tel['X'], tel['Y'], tel['Speed']))
+                            speed_line=speed_line)
+
+    speed_kph = track.channels['speed_kph']
+    along_line = float(np.sum(track.step / np.maximum(speed_kph / 3.6, 1.0)))
 
     return Reference(track=track,
-                     speed_kph=track.channels['speed_kph'],
-                     lap_time=fastest['LapTime'].total_seconds(),
-                     drag_limited=drag_limited)
+                     speed_kph=speed_kph,
+                     lap_time=along_line,
+                     drag_limited=drag_limited,
+                     official_time=fastest['LapTime'].total_seconds(),
+                     stream_offset=stream_offset,
+                     clock=clock,
+                     notes=notes)
 
 # ---------------------------------------------------------------------------
 # Diagnostics
@@ -1020,8 +1244,12 @@ if __name__ == '__main__':
                                     drag_limited=drag_limited)
         print(f"  {reference.track.length:.0f}m, "
               f"tightest radius {reference.track.radius.min():.0f}m, "
-              f"lap {reference.lap_time:.3f}s")
+              f"lap {reference.official_time:.3f}s, "
+              f"{reference.lap_time:.3f}s along this line")
         print(f"  {reference.track.source}")
+        print(f"  {reference.clock}")
+        for note in reference.notes:
+            print(f"  WARNING: {note}")
         references.append(reference)
 
     print("\nGeometry check (real F1 cars peak around 5-6g):")
@@ -1064,7 +1292,8 @@ if __name__ == '__main__':
     results = [simulate(reference.track, car)
                for reference, car in zip(references, cars)]
 
-    print("\nPer-circuit results:")
+    print("\nPer-circuit results (against the real lap along the same "
+          "line):")
     for reference, result in zip(references, results):
         error = result.lap_time - reference.lap_time
         print(f"  {reference.track.name}: {result.lap_time:.3f}s "
