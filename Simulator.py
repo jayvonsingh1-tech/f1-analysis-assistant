@@ -374,6 +374,7 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
                  source=f"pooled from {len(positions)} laps, "
                         f"smoothing spline ({smoothing})",
                  channels=channels)
+
 # ---------------------------------------------------------------------------
 # Physics
 # ---------------------------------------------------------------------------
@@ -436,8 +437,20 @@ def _terminal_speed(car):
     """Top speed where power equals drag."""
     return (car.power / (0.5 * AIR_DENSITY * car.cda)) ** (1 / 3)
 
-def simulate(track, car, initial_speed=None):
-    """Run a quasi-steady-state lap simulation."""
+def simulate(track, car, initial_speed=None, periodic=False):
+    """Run a quasi-steady-state lap simulation.
+
+    The starting speed matters. Without it the car begins every lap at
+    its theoretical top speed instead of the speed it actually crossed
+    the line at. The start speed comes from, in order:
+      1. initial_speed, if given
+      2. the real speed at the line, if the track carries a measured
+         speed channel (geometry built from driven laps does)
+      3. periodic=True: run the lap twice, starting the second pass at
+         the first pass's finishing speed - correct for a flying lap
+         with no measured data, at twice the cost
+      4. otherwise the cornering limit at the start
+    """
     step = track.step
     curvature = track.curvature
     points = len(track.distance)
@@ -445,23 +458,34 @@ def simulate(track, car, initial_speed=None):
     corner_speed = cornering_limit(track, car)
     corner_speed = np.minimum(corner_speed, _terminal_speed(car))
 
-    forward = np.empty(points)
-    forward[0] = corner_speed[0] if initial_speed is None else initial_speed
+    if initial_speed is None and 'speed_kph' in track.channels:
+        initial_speed = float(track.channels['speed_kph'][0]) / 3.6
 
-    for i in range(1, points):
-        acceleration = available_longitudinal(
-            car, forward[i - 1], curvature[i - 1], braking=False)
-        squared = forward[i - 1] ** 2 + 2 * acceleration * step
-        forward[i] = min(np.sqrt(max(squared, 1.0)), corner_speed[i])
+    def one_pass(start):
+        forward = np.empty(points)
+        forward[0] = min(start, corner_speed[0])
+        for i in range(1, points):
+            acceleration = available_longitudinal(
+                car, forward[i - 1], curvature[i - 1], braking=False)
+            squared = forward[i - 1] ** 2 + 2 * acceleration * step
+            forward[i] = min(np.sqrt(max(squared, 1.0)), corner_speed[i])
 
-    backward = np.empty(points)
-    backward[-1] = corner_speed[-1]
+        backward = np.empty(points)
+        backward[-1] = corner_speed[-1]
+        for i in range(points - 2, -1, -1):
+            deceleration = available_longitudinal(
+                car, backward[i + 1], curvature[i + 1], braking=True)
+            squared = backward[i + 1] ** 2 + 2 * deceleration * step
+            backward[i] = min(np.sqrt(max(squared, 1.0)), corner_speed[i])
 
-    for i in range(points - 2, -1, -1):
-        deceleration = available_longitudinal(
-            car, backward[i + 1], curvature[i + 1], braking=True)
-        squared = backward[i + 1] ** 2 + 2 * deceleration * step
-        backward[i] = min(np.sqrt(max(squared, 1.0)), corner_speed[i])
+        return forward, backward
+
+    start = corner_speed[0] if initial_speed is None else initial_speed
+    forward, backward = one_pass(start)
+
+    if periodic and initial_speed is None:
+        lap_end = min(forward[-1], backward[-1])
+        forward, backward = one_pass(lap_end)
 
     speed = np.minimum(np.minimum(forward, backward), corner_speed)
 
@@ -703,7 +727,8 @@ if __name__ == '__main__':
                          "Set CHECK_ONLY = False to run the fit.")
 
     print("\nFitting...")
-    shared_values, cars, outcome = fit_multi(references, F1_2024)
+    shared_values, cars, outcome = fit_multi(
+        references, F1_2024, shared=('mu', 'drive_fraction'))
 
     print("\nPer-circuit results:")
     for reference, car in zip(references, cars):
