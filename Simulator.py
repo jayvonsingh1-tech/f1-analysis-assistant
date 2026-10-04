@@ -6,14 +6,15 @@ under acceleration limits and backward under braking limits. The lowest of
 the three at each point is the speed the car can actually carry.
 
 Geometry and car are described separately from the physics, so the same
-simulator runs any car on any line. Track geometry currently comes from a
-driven telemetry line, so the simulator answers "how fast could this car go
-round the line this driver took" rather than "what is the optimal lap".
+simulator runs any car on any line. Track geometry currently comes from
+driven laps, so the simulator answers "how fast could this car go round the
+line drivers took" rather than "what is the optimal lap".
 
 MODEL ASSUMPTIONS AND LIMITATIONS
 
-This is a point mass with two refinements: load-sensitive tyres, and a
-driven-axle limit on acceleration. Not modelled:
+This is a point mass with three refinements: load-sensitive tyres, a
+driven-axle limit on acceleration, and a tractive force cap at low speed.
+Not modelled:
   - explicit weight transfer between individual wheels
   - aerodynamic balance shifting with ride height
   - a torque curve and gear ratios; power is a single figure
@@ -21,23 +22,43 @@ driven-axle limit on acceleration. Not modelled:
   - elevation change, banking and kerbs
 
 Grip sharing uses a friction ellipse, which assumes equal peak grip
-laterally and longitudinally. Validation shows this is the model's main
-weakness: fits that match lap time tend to underpredict acceleration and
-overpredict braking.
+laterally and longitudinally.
+
+GEOMETRY
+
+Geometry quality dominates everything else. FastF1 position data arrives
+about four times a second, which is too sparse within a single lap to
+compute curvature reliably. track_from_laps() pools many laps, which adds
+genuine spatial resolution, then fits a penalised smoothing spline: it
+penalises bending, so it curves only where the data demands. Fixed-knot
+splines were tried and rejected - they overfit the lap-to-lap differences
+in line and produced curvature noise everywhere.
+
+Always check implied lateral acceleration (v^2 * curvature) before
+fitting. Anything well above 6g is noise, and the fit will bend the car
+parameters to compensate for it.
+
+FITTING
 
 Fitting a single circuit is underdetermined - many parameter sets produce
-the same lap time. fit_multi() fits several circuits at once, sharing the
-tyre parameters while letting aero vary per circuit, which is both more
-physically honest (teams change wing level) and better constrained.
+the same lap time. fit_multi() fits several circuits at once, sharing tyre
+parameters while letting aero vary per circuit.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
+from scipy.interpolate import make_smoothing_spline
 from scipy.optimize import minimize
+from scipy.signal import savgol_filter
+from scipy.spatial import cKDTree
 
 GRAVITY = 9.81
 AIR_DENSITY = 1.225      # kg/m3 at sea level, 15C
+
+# ---------------------------------------------------------------------------
+# Car
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Car:
@@ -49,11 +70,11 @@ class Car:
     cda: float               # drag coefficient x area, m2
     mu: float                # tyre friction coefficient at reference load
     brake_limit: float       # maximum braking deceleration, g
-    load_sensitivity: float = 0.0    # exponent k; 0 means constant mu
-    reference_load: float = 2100.0   # N per tyre at which mu applies
-    drive_fraction: float = 1.0      # share of grip the driven axle can use
-    drs_cda_delta: float = 0.0       # drag reduction when DRS is open
+    load_sensitivity: float = 0.0     # exponent k; 0 means constant mu
+    reference_load: float = 2100.0    # N per tyre at which mu applies
+    drive_fraction: float = 1.0       # share of grip the driven axle can use
     max_tractive_force: float = 1e9   # N, torque limit at low speed
+    drs_cda_delta: float = 0.0        # drag reduction when DRS is open
 
     def downforce(self, speed):
         return 0.5 * AIR_DENSITY * self.cla * speed ** 2
@@ -92,17 +113,27 @@ F1_2024 = Car(
     load_sensitivity=0.15,
     reference_load=2100.0,
     drive_fraction=0.55,
-    drs_cda_delta=0.30,
     max_tractive_force=18_000.0,
+    drs_cda_delta=0.30,
 )
+
+# ---------------------------------------------------------------------------
+# Track geometry
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Track:
-    """Geometry of a line round a circuit, at even spacing."""
+    """Geometry of a line round a circuit, at even spacing.
+
+    channels holds any other data resampled onto the same distance grid,
+    such as the real speed along a driven line. Computed geometry has
+    none.
+    """
     name: str
     distance: np.ndarray
     curvature: np.ndarray
     source: str
+    channels: dict = field(default_factory=dict)
 
     @property
     def radius(self):
@@ -131,56 +162,221 @@ class LapResult:
     def speed_kph(self):
         return self.speed * 3.6
 
-def track_from_telemetry(x, y, name="unknown", spacing=1.0,
-                         smoothing_metres=20.0, scale=0.1):
-    """Build a Track from a driven telemetry line.
+def track_from_telemetry(x, y, time, name="unknown", spacing=1.0,
+                         smoothing_seconds=1.0, sample_rate=10.0,
+                         scale=0.1, channels=None):
+    """Build a Track from a single driven lap.
 
-    Resamples to even spacing before smoothing, so the filter spans a
-    consistent length of track everywhere.
-
-    spacing: metres between simulation points. Smaller is more accurate
-        and slower.
-    smoothing_metres: how much track the smoothing filter averages over.
-        Must be short enough not to blur the tightest corners: Monaco
-        needs less than Monza.
+    Kept for quick single-lap use, but one lap's position data is too
+    sparse for reliable curvature. Prefer track_from_laps() for anything
+    that matters.
     """
     x = np.asarray(x, dtype=float) * scale
     y = np.asarray(y, dtype=float) * scale
+    t = np.asarray(time, dtype=float)
+    channels = {key: np.asarray(value, dtype=float)
+                for key, value in (channels or {}).items()}
 
-    step = np.hypot(np.diff(x), np.diff(y))
-    raw_distance = np.concatenate([[0], np.cumsum(step)])
+    order = np.argsort(t)
+    t, x, y = t[order], x[order], y[order]
+    channels = {key: value[order] for key, value in channels.items()}
 
-    keep = np.concatenate([[True], step > 1e-6])
-    x, y, raw_distance = x[keep], y[keep], raw_distance[keep]
+    unique = np.concatenate([[True], np.diff(t) > 1e-6])
+    t, x, y = t[unique], x[unique], y[unique]
+    channels = {key: value[unique] for key, value in channels.items()}
 
-    distance = np.arange(0, raw_distance[-1], spacing)
-    rx = np.interp(distance, raw_distance, x)
-    ry = np.interp(distance, raw_distance, y)
+    dt = 1.0 / sample_rate
+    grid_t = np.arange(t[0], t[-1], dt)
+    gx = np.interp(grid_t, t, x)
+    gy = np.interp(grid_t, t, y)
+    grid_channels = {key: np.interp(grid_t, t, value)
+                     for key, value in channels.items()}
 
-    window_points = max(3, int(round(smoothing_metres / spacing)))
-    if window_points > 1:
-        window = np.ones(window_points) / window_points
-        rx = np.convolve(rx, window, mode='same')
-        ry = np.convolve(ry, window, mode='same')
-        edge = window_points
-        distance = distance[edge:-edge]
-        rx, ry = rx[edge:-edge], ry[edge:-edge]
-        distance = distance - distance[0]
+    window = max(int(round(smoothing_seconds / dt)) | 1, 5)
 
-    dx = np.gradient(rx, spacing)
-    dy = np.gradient(ry, spacing)
-    ddx = np.gradient(dx, spacing)
-    ddy = np.gradient(dy, spacing)
+    def smooth(values, order):
+        return savgol_filter(values, window, polyorder=3, deriv=order,
+                             delta=dt, mode='interp')
+
+    sx, sy = smooth(gx, 0), smooth(gy, 0)
+    vx, vy = smooth(gx, 1), smooth(gy, 1)
+    accx, accy = smooth(gx, 2), smooth(gy, 2)
+
+    numerator = np.abs(vx * accy - vy * accx)
+    denominator = (vx ** 2 + vy ** 2) ** 1.5
+    curvature_t = np.divide(numerator, denominator,
+                            out=np.zeros_like(numerator),
+                            where=denominator > 1e-9)
+
+    along = np.concatenate(
+        [[0], np.cumsum(np.hypot(np.diff(sx), np.diff(sy)))])
+    distance = np.arange(0, along[-1], spacing)
+    curvature = np.interp(distance, along, curvature_t)
+    resampled = {key: np.interp(distance, along, value)
+                 for key, value in grid_channels.items()}
+
+    return Track(name=name, distance=distance, curvature=curvature,
+                 source=f"single lap, {smoothing_seconds}s smoothing",
+                 channels=resampled)
+
+def _resample_line(x, y, spacing=1.0, smooth_metres=15.0):
+    """Evenly spaced, lightly smoothed copy of a line.
+
+    Used only to align laps against each other, so it needs to be in the
+    right place, not to have accurate curvature.
+    """
+    moved = np.hypot(np.diff(x), np.diff(y)) > 1e-6
+    keep = np.concatenate([[True], moved])
+    x, y = x[keep], y[keep]
+
+    raw = np.concatenate([[0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+    s = np.arange(0, raw[-1], spacing)
+    rx = np.interp(s, raw, x)
+    ry = np.interp(s, raw, y)
+
+    window = max(int(round(smooth_metres / spacing)) | 1, 5)
+    rx = savgol_filter(rx, window, polyorder=2, mode='interp')
+    ry = savgol_filter(ry, window, polyorder=2, mode='interp')
+    return s, rx, ry
+
+def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
+                    scale=0.1, max_offset=8.0, bin_width=0.5,
+                    speed_line=None):
+    """Build a Track by pooling position data from many laps.
+
+    One lap's position data has about four samples a second - too few per
+    corner to compute a second derivative reliably. Pooling laps adds
+    genuine resolution: each lap is sampled at different points round the
+    track, so twenty laps give roughly twenty times the samples, and
+    random position noise averages out.
+
+    Method:
+      1. Use the first lap as a reference line, and give every sample
+         from every lap a continuous distance along it
+      2. Average the samples into short bins along the track, each bin
+         weighted by how many samples it holds
+      3. Fit a penalised smoothing spline through the bin averages, x and
+         y each as a function of distance
+      4. Differentiate the spline analytically for curvature
+
+    Binning matters for two reasons. The smoothing spline puts a knot at
+    every data point, so samples from different laps landing millimetres
+    apart make it numerically singular. And a bin average of n samples
+    has 1/n the variance of one sample, so weighting by n is the correct
+    way to combine them.
+
+    The smoothing spline penalises bending, so it curves only where the
+    data demands. Straights stay straight; tight corners are still
+    followed because the car is slow there and the samples are dense.
+    Fixed-knot splines were rejected because they overfit the small
+    lap-to-lap differences in line, producing curvature noise everywhere.
+
+    The cost: a uniform penalty slightly rounds off the fastest, most
+    sparsely sampled direction changes, so the sim may be a little quick
+    through those.
+
+    positions: list of (x, y) raw position arrays, one per lap. The first
+        is the alignment reference, so use the fastest lap.
+    lam: smoothing strength. None chooses it automatically by generalised
+        cross-validation. Raise it to smooth harder.
+    max_offset: metres. Samples further than this from the reference line
+        are dropped, which removes off-track moments and data glitches.
+    bin_width: metres of track per averaging bin.
+    speed_line: optional (x, y, speed_kph) from one lap, projected onto
+        the fitted line so its speed is aligned with the geometry.
+
+    The result is an average line across laps, slightly smoother than any
+    single lap a driver actually drove.
+    """
+    # 1. Reference line from the first lap, plus its unit tangent
+    ref_s, ref_x, ref_y = _resample_line(
+        np.asarray(positions[0][0], dtype=float) * scale,
+        np.asarray(positions[0][1], dtype=float) * scale)
+    ref_tree = cKDTree(np.column_stack([ref_x, ref_y]))
+
+    tangent_x = np.gradient(ref_x)
+    tangent_y = np.gradient(ref_y)
+    norm = np.maximum(np.hypot(tangent_x, tangent_y), 1e-9)
+    tangent_x, tangent_y = tangent_x / norm, tangent_y / norm
+
+    pooled_s, pooled_x, pooled_y = [], [], []
+    for lap_x, lap_y in positions:
+        lap_x = np.asarray(lap_x, dtype=float) * scale
+        lap_y = np.asarray(lap_y, dtype=float) * scale
+        offset, index = ref_tree.query(np.column_stack([lap_x, lap_y]))
+
+        near = offset < max_offset
+        idx = index[near]
+        px, py = lap_x[near], lap_y[near]
+
+        # Continuous distance: the nearest reference point plus the
+        # along-track part of the gap to it
+        along = ((px - ref_x[idx]) * tangent_x[idx]
+                 + (py - ref_y[idx]) * tangent_y[idx])
+
+        pooled_s.append(ref_s[idx] + along)
+        pooled_x.append(px)
+        pooled_y.append(py)
+
+    s = np.concatenate(pooled_s)
+    x = np.concatenate(pooled_x)
+    y = np.concatenate(pooled_y)
+
+    # 2. Average into bins along the track, weighted by sample count.
+    # Bin centres are exactly bin_width apart, which keeps the spline
+    # well conditioned.
+    start = s.min()
+    bins = np.floor((s - start) / bin_width).astype(int)
+    counts = np.bincount(bins)
+    occupied = counts > 0
+
+    bin_s = start + (np.flatnonzero(occupied) + 0.5) * bin_width
+    bin_x = np.bincount(bins, weights=x)[occupied] / counts[occupied]
+    bin_y = np.bincount(bins, weights=y)[occupied] / counts[occupied]
+    weights = counts[occupied].astype(float)
+
+    # 3. Penalised smoothing spline through the bin averages
+    spline_x = make_smoothing_spline(bin_s, bin_x, w=weights, lam=lam)
+    spline_y = make_smoothing_spline(bin_s, bin_y, w=weights, lam=lam)
+
+    # 4. Analytic derivatives on a fine grid
+    fine = np.arange(bin_s[0], bin_s[-1], spacing / 4)
+    fx, fy = spline_x(fine), spline_y(fine)
+    dx, dy = spline_x.derivative(1)(fine), spline_y.derivative(1)(fine)
+    ddx, ddy = spline_x.derivative(2)(fine), spline_y.derivative(2)(fine)
 
     numerator = np.abs(dx * ddy - dy * ddx)
     denominator = (dx ** 2 + dy ** 2) ** 1.5
-    curvature = np.divide(numerator, denominator,
-                          out=np.zeros_like(numerator),
-                          where=denominator > 1e-9)
+    curvature_fine = np.divide(numerator, denominator,
+                               out=np.zeros_like(numerator),
+                               where=denominator > 1e-9)
 
+    # Even spacing in true arc length along the fitted line
+    arc = np.concatenate(
+        [[0], np.cumsum(np.hypot(np.diff(fx), np.diff(fy)))])
+    distance = np.arange(0, arc[-1], spacing)
+    curvature = np.interp(distance, arc, curvature_fine)
+
+    channels = {}
+    if speed_line is not None:
+        line_x = np.asarray(speed_line[0], dtype=float) * scale
+        line_y = np.asarray(speed_line[1], dtype=float) * scale
+        line_v = np.asarray(speed_line[2], dtype=float)
+        fitted_tree = cKDTree(np.column_stack([fx, fy]))
+        _, index = fitted_tree.query(np.column_stack([line_x, line_y]))
+        along = arc[index]
+        order = np.argsort(along, kind='stable')
+        channels['speed_kph'] = np.interp(distance, along[order],
+                                          line_v[order])
+
+    smoothing = "automatic" if lam is None else f"lam {lam}"
     return Track(name=name, distance=distance, curvature=curvature,
-                 source=f"driven line, {spacing}m steps, "
-                        f"{smoothing_metres}m smoothing")
+                 source=f"pooled from {len(positions)} laps, "
+                        f"smoothing spline ({smoothing})",
+                 channels=channels)
+# ---------------------------------------------------------------------------
+# Physics
+# ---------------------------------------------------------------------------
 
 def cornering_limit(track, car, iterations=25):
     """Maximum speed at each point, set by lateral grip.
@@ -208,7 +404,11 @@ def cornering_limit(track, car, iterations=25):
     return speed
 
 def available_longitudinal(car, speed, curvature, braking=False):
-    """Longitudinal acceleration available, in m/s2."""
+    """Longitudinal acceleration available, in m/s2.
+
+    One grip budget shared between cornering and accelerating or braking,
+    via a friction ellipse.
+    """
     grip = car.grip_force(speed)
 
     lateral_force = car.mass * speed ** 2 * curvature
@@ -218,12 +418,14 @@ def available_longitudinal(car, speed, curvature, braking=False):
     drag = car.drag(speed)
 
     if braking:
+        # All four tyres brake, and drag helps
         tyre_limit = grip * remaining
         mechanical_limit = car.brake_limit * car.mass * GRAVITY
         force = np.minimum(tyre_limit, mechanical_limit) + drag
         return force / car.mass
-    # Power gives F = P/v, which is unbounded as v approaches zero. Real
-    # cars are torque-limited at low speed, so cap the tractive force.
+
+    # Only the driven axle puts power down. P/v is unbounded as speed
+    # approaches zero, but real cars are torque-limited there, so cap it.
     traction_limit = grip * remaining * car.drive_fraction
     power_limit = np.minimum(car.power / np.maximum(speed, 1.0),
                              car.max_tractive_force)
@@ -274,20 +476,26 @@ def simulate(track, car, initial_speed=None):
     return LapResult(track=track, car=car, speed=speed,
                      lap_time=lap_time, limit=limit)
 
+# ---------------------------------------------------------------------------
+# Fitting
+# ---------------------------------------------------------------------------
+
 @dataclass
 class Reference:
     """One real lap to fit against."""
     track: Track
-    speed_kph: np.ndarray    # actual speed at each of track.distance
+    speed_kph: np.ndarray    # real speed at each of track.distance
     lap_time: float          # actual, seconds
+    drag_limited: bool = True    # does the car reach terminal speed here?
 
 def lap_error(track, car, reference):
     """Dimensionless error between a simulated and a real lap.
 
-    Weighted towards the speed trace rather than lap time. A single lap
-    time can be hit by many wrong parameter sets; matching the trace at
-    every point is far harder to fake. Top speed gets its own term
-    because it cleanly isolates the drag and power balance.
+    Weighted towards the speed trace, which is far harder to fake than a
+    single lap time. Top speed gets its own term only where the car
+    actually reaches terminal speed; on a short-straight circuit like
+    Monaco top speed is set by straight length, not drag, and using it
+    would force a nonsense drag value.
     """
     try:
         result = simulate(track, car)
@@ -299,11 +507,15 @@ def lap_error(track, car, reference):
     speed_error = np.sqrt(np.mean(
         ((result.speed - actual_ms) / np.maximum(actual_ms, 1.0)) ** 2))
 
-    top_error = abs(result.speed.max() - actual_ms.max()) / actual_ms.max()
-
     time_error = abs(result.lap_time - reference.lap_time) / reference.lap_time
 
-    return speed_error + 1.0 * top_error + 0.5 * time_error, result
+    error = speed_error + 0.5 * time_error
+
+    if reference.drag_limited:
+        top_error = abs(result.speed.max() - actual_ms.max()) / actual_ms.max()
+        error += top_error
+
+    return error, result
 
 SHARED_BOUNDS = {
     'mu': (1.0, 2.5),
@@ -325,14 +537,8 @@ def fit_multi(references, base_car,
 
     Tyre and drivetrain parameters are shared, because they don't change
     between races. Aero is fitted per circuit, because teams genuinely run
-    different wing levels - a Monza car has far less downforce than a
-    Monaco one, so forcing one ClA across both would be wrong.
+    different wing levels.
 
-    Fitting several circuits simultaneously constrains the shared
-    parameters far better than any single lap can, because each circuit
-    stresses a different part of the model.
-
-    references: list of Reference
     Returns (shared_values, per_circuit_cars, outcome)
     """
     n = len(references)
@@ -374,8 +580,11 @@ def fit_multi(references, base_car,
               f"mean error {outcome.fun:.4f})")
         print("\n  Shared (tyres and drivetrain):")
         for name, value in shared_values.items():
+            low, high = SHARED_BOUNDS[name]
+            flag = ("  <- at bound"
+                    if min(value - low, high - value) < 1e-3 else "")
             print(f"    {name}: {getattr(base_car, name):.3f} "
-                  f"-> {value:.3f}")
+                  f"-> {value:.3f}{flag}")
         print("\n  Per circuit (aero):")
         for reference, car in zip(references, cars):
             print(f"    {reference.track.name}: "
@@ -384,18 +593,52 @@ def fit_multi(references, base_car,
 
     return shared_values, cars, outcome
 
-def build_reference(year, race, driver, spacing=1.0, smoothing_metres=20.0):
-    """Load a real lap and prepare it for fitting."""
+def build_reference(year, race, driver, spacing=1.0, lam=None,
+                    max_laps=20, drag_limited=True):
+    """Load a driver's laps and prepare a reference for fitting.
+
+    Geometry is pooled from up to max_laps clean laps on the same compound
+    as the fastest lap, so the lines are comparable. Speed and lap time
+    come from the fastest lap alone.
+    """
     import telemetry
 
-    lap, tel, session = telemetry.get_lap_telemetry(year, race, driver)
-    track = track_from_telemetry(tel['X'], tel['Y'], name=race,
-                                 spacing=spacing,
-                                 smoothing_metres=smoothing_metres)
-    speed = np.interp(track.distance, tel['Distance'], tel['Speed'])
+    session = telemetry.load_session(year, race)
+    laps = session.laps.pick_drivers(driver).pick_quicklaps().pick_wo_box()
+    fastest = laps.pick_fastest()
+    if fastest is None:
+        raise ValueError(f"{driver} has no clean laps at {race} {year}.")
 
-    return Reference(track=track, speed_kph=speed,
-                     lap_time=lap['LapTime'].total_seconds())
+    # The fastest lap goes first, because it is the alignment reference
+    fastest_pos = fastest.get_pos_data()
+    positions = [(fastest_pos['X'].to_numpy(), fastest_pos['Y'].to_numpy())]
+
+    same_compound = laps[laps['Compound'] == fastest['Compound']]
+    for _, lap in same_compound.iterlaps():
+        if len(positions) >= max_laps:
+            break
+        if lap['LapNumber'] == fastest['LapNumber']:
+            continue
+        try:
+            pos = lap.get_pos_data()
+        except Exception:
+            continue
+        if pos is None or len(pos) < 50:
+            continue
+        positions.append((pos['X'].to_numpy(), pos['Y'].to_numpy()))
+
+    tel = fastest.get_telemetry()
+    track = track_from_laps(positions, name=race, spacing=spacing, lam=lam,
+                            speed_line=(tel['X'], tel['Y'], tel['Speed']))
+
+    return Reference(track=track,
+                     speed_kph=track.channels['speed_kph'],
+                     lap_time=fastest['LapTime'].total_seconds(),
+                     drag_limited=drag_limited)
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
@@ -404,26 +647,60 @@ if __name__ == '__main__':
 
     style.apply()
 
-    # Circuits chosen to stress different parts of the model:
-    # Monza low downforce, Monaco low speed, Silverstone high speed,
-    # Barcelona mixed. Monaco gets tighter smoothing because its corners
-    # are short enough that a 20m filter would blur them.
+    # Geometry check only. Set to False once every circuit passes.
+    CHECK_ONLY = False
+
+    # (year, race, driver, smoothing - None for automatic, terminal speed?)
     setups = [
-        (2024, 'Monza', 'NOR', 20.0),
-        (2024, 'Monaco', 'LEC', 10.0),
-        (2024, 'Silverstone', 'HAM', 20.0),
-        (2024, 'Barcelona', 'VER', 15.0),
+        (2024, 'Monza', 'NOR', None, True),
+        (2024, 'Monaco', 'LEC', 100000, False),
+        (2024, 'Silverstone', 'HAM', None, True),
+        (2024, 'Barcelona', 'VER', None, True),
     ]
 
     references = []
-    for year, race, driver, smoothing in setups:
+    for year, race, driver, lam, drag_limited in setups:
         print(f"Loading {race} {year} ({driver})...")
-        reference = build_reference(year, race, driver,
-                                    smoothing_metres=smoothing)
+        reference = build_reference(year, race, driver, lam=lam,
+                                    drag_limited=drag_limited)
         print(f"  {reference.track.length:.0f}m, "
               f"tightest radius {reference.track.radius.min():.0f}m, "
               f"lap {reference.lap_time:.3f}s")
+        print(f"  {reference.track.source}")
         references.append(reference)
+
+    print("\nGeometry check (real F1 cars peak around 5-6g):")
+    lateral = {}
+    for reference in references:
+        track = reference.track
+        speed_ms = reference.speed_kph / 3.6
+        g = speed_ms ** 2 * track.curvature / GRAVITY
+        lateral[track.name] = g
+        print(f"  {track.name}: peak {np.nanmax(g):.1f}g, "
+              f"points above 6g: {int((g > 6).sum())}")
+
+    if CHECK_ONLY:
+        fig, axes = plt.subplots(len(references), 1,
+                                 figsize=(13, 2.6 * len(references)))
+        for axis, reference in zip(axes, references):
+            g = lateral[reference.track.name]
+            axis.plot(reference.track.distance, g,
+                      color=style.DRIVER_B, linewidth=1)
+            axis.axhline(6, color=style.ACCENT, linewidth=0.8,
+                         linestyle='--')
+            axis.set_ylabel('lateral g')
+            axis.set_ylim(0, max(8, min(np.nanmax(g), 15)))
+            axis.set_title(f"{reference.track.name}  peak "
+                           f"{np.nanmax(g):.1f}g",
+                           color=style.TEXT, fontsize=11)
+        axes[-1].set_xlabel('Distance (m)')
+        style.title(fig, "Geometry check",
+                    "Dashed line is 6g. Narrow spikes are noise; "
+                    "sustained plateaus are real corners.")
+        plt.tight_layout(rect=[0, 0, 1, 0.93])
+        plt.show()
+        raise SystemExit("\nGeometry check only. "
+                         "Set CHECK_ONLY = False to run the fit.")
 
     print("\nFitting...")
     shared_values, cars, outcome = fit_multi(references, F1_2024)
@@ -439,17 +716,18 @@ if __name__ == '__main__':
 
     fig, axes = plt.subplots(len(references), 1,
                              figsize=(13, 3 * len(references)))
-    for ax, reference, car in zip(axes, references, cars):
+    for axis, reference, car in zip(axes, references, cars):
         result = simulate(reference.track, car)
-        ax.plot(reference.track.distance, reference.speed_kph,
-                color=style.DRIVER_A, label='Actual', linewidth=1.2)
-        ax.plot(reference.track.distance, result.speed_kph,
-                color=style.DRIVER_B, label='Simulated', linewidth=1.2)
-        ax.set_ylabel('km/h')
-        ax.set_title(f"{reference.track.name}  "
-                     f"{result.lap_time:.3f}s vs {reference.lap_time:.3f}s",
-                     color=style.TEXT, fontsize=11)
-        ax.legend(fontsize=8)
+        axis.plot(reference.track.distance, reference.speed_kph,
+                  color=style.DRIVER_A, label='Actual', linewidth=1.2)
+        axis.plot(reference.track.distance, result.speed_kph,
+                  color=style.DRIVER_B, label='Simulated', linewidth=1.2)
+        axis.set_ylabel('km/h')
+        axis.set_title(f"{reference.track.name}  "
+                       f"{result.lap_time:.3f}s vs "
+                       f"{reference.lap_time:.3f}s",
+                       color=style.TEXT, fontsize=11)
+        axis.legend(fontsize=8)
     axes[-1].set_xlabel('Distance (m)')
 
     style.title(fig, "Multi-circuit fit",
