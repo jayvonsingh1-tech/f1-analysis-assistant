@@ -134,6 +134,7 @@ class Car:
     load_sensitivity: float = 0.0     # exponent k; 0 means constant mu
     reference_load: float = 2100.0    # N per tyre at which mu applies
     drive_fraction: float = 1.0       # share of grip the driven axle can use
+    brake_fraction: float = 1.0       # share of grip usable under braking
     max_tractive_force: float = 1e9   # N, torque limit at low speed
     drs_cda_delta: float = 0.0        # drag reduction when DRS is open
 
@@ -627,8 +628,9 @@ def available_longitudinal(car, speed, curvature, braking=False):
     drag = car.drag(speed)
 
     if braking:
-        # All four tyres brake, and drag helps
-        tyre_limit = grip * remaining
+        # All four tyres brake, and drag helps. brake_fraction below 1
+        # allows for them not all reaching their limit together.
+        tyre_limit = grip * remaining * car.brake_fraction
         mechanical_limit = car.brake_limit * car.mass * GRAVITY
         force = min(tyre_limit, mechanical_limit) + drag
         return force / car.mass
@@ -820,6 +822,7 @@ SHARED_BOUNDS = {
     'load_sensitivity': (0.0, 0.4),
     'drive_fraction': (0.3, 1.0),
     'brake_limit': (3.0, 9.0),
+    'brake_fraction': (0.5, 1.2),
 }
 AERO_BOUNDS = {
     'cla': (2.5, 7.5),
@@ -846,8 +849,10 @@ def fit_multi(references, base_car,
 
     Only fit what the laps can pin down. Tested on made-up laps with a
     known car: load_sensitivity trades off against downforce and comes
-    out badly wrong, and brake_limit hardly changes a lap, so both are
-    better held at an assumed value than fitted.
+    out badly wrong, and brake_limit does nothing for a car like this
+    (its tyres give up before its brakes do), so both are better held
+    at an assumed value than fitted. brake_fraction can be pinned down;
+    see braking_check().
 
     Returns (shared_values, per_circuit_cars, outcome)
     """
@@ -1195,6 +1200,41 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
 # Diagnostics
 # ---------------------------------------------------------------------------
 
+def braking_check(references, base_car, outcome,
+                  shared=('mu', 'drive_fraction')):
+    """Does the real car brake as hard as the model says it could?
+
+    The model lets all four tyres brake at their limit at once. A real
+    car cannot quite manage that: its brakes are split front to rear in
+    a fixed proportion, while the load on each axle keeps changing. If
+    the real car brakes well inside the model's limit and the fit is not
+    told, it lowers the tyre grip to explain it, and downforce then
+    comes out too high to make up for the grip.
+
+    This runs the fit again with brake_fraction free, and reports where
+    it settles and how much better the laps then match.
+
+    outcome: what fit_multi() returned for the same references with
+        brake_fraction held at 1
+
+    How to read the result. Tested on made-up laps with a known car:
+      - where the car braked at the full limit, brake_fraction still
+        came out at 0.83 to 0.96 and the squared differences fell by 14
+        to 27%, because it also soaks up geometry error at corner
+        entries
+      - where the car braked at 75 to 85% of the limit, it came out at
+        0.68 to 0.82 and they fell by 60 to 90%
+    The size of the fall separates the two cases more cleanly than the
+    value does.
+
+    Returns (shared_values, improvement). improvement is the fraction
+    by which the sum of squared differences fell.
+    """
+    shared_values, _, freed = fit_multi(
+        references, base_car, shared=tuple(shared) + ('brake_fraction',),
+        verbose=False)
+    return shared_values, 1.0 - freed.cost / outcome.cost
+
 def biggest_gaps(result, reference, count=3, window=150.0):
     """Where a simulated lap differs most from the real one.
 
@@ -1259,6 +1299,10 @@ if __name__ == '__main__':
 
     # Geometry check only. Set to False once every circuit passes.
     CHECK_ONLY = False
+
+    # After the fit, also test whether the real car brakes as hard as
+    # the model allows (see braking_check). Costs one more fit.
+    CHECK_BRAKING = True
 
     # (year, race, driver, smoothing - None for automatic, terminal speed?)
     # Monaco is left out: it fails the geometry check at 11g, in the two
@@ -1348,6 +1392,18 @@ if __name__ == '__main__':
                   f"{row['time']:+.2f}s, corner needs "
                   f"{row['needs_g']:.1f}g, car has "
                   f"{row['has_g']:.1f}g{flag}")
+
+    if CHECK_BRAKING:
+        print("\nBraking check (the same fit with brake_fraction free):")
+        freed, improvement = braking_check(references, F1_2024, outcome)
+        print(f"  brake_fraction {freed['brake_fraction']:.3f}, "
+              f"mu {freed['mu']:.3f}, "
+              f"drive_fraction {freed['drive_fraction']:.3f}, "
+              f"squared differences down {improvement:.0%}")
+        print("  A car braking at the tyres' full limit reads 0.83 to "
+              "0.96 and 14 to 27% here.")
+        print("  One braking at 75 to 85% of it reads 0.68 to 0.82 and "
+              "60 to 90%.")
 
     fig, axes = plt.subplots(len(references), 1,
                              figsize=(13, 3 * len(references)))
