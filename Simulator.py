@@ -692,6 +692,61 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
                      drag_limited=drag_limited)
 
 # ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
+
+def biggest_gaps(result, reference, count=3, window=150.0):
+    """Where a simulated lap differs most from the real one.
+
+    Finds the points with the largest speed difference, at least `window`
+    metres apart. Returns one dict per point:
+      distance   metres from the start of the lap
+      sim_kph    simulated speed there
+      real_kph   real speed there
+      time       seconds the sim loses (+) or gains (-) within `window`
+                 metres either side
+      needs_g    most lateral acceleration the geometry demands in that
+                 stretch, at the speed the real car carried
+      has_g      lateral acceleration the simulated car can generate at
+                 that same speed
+
+    When needs_g is well above has_g the car cannot take the corner at
+    the real speed, so the sim has to slow down. No real car pulls much
+    more than 6g, so a needs_g above that points at the geometry, not at
+    the car.
+    """
+    track, car = result.track, result.car
+    real_kph = np.asarray(reference.speed_kph, dtype=float)
+    real = np.maximum(real_kph / 3.6, 1.0)
+    simulated = np.maximum(result.speed, 1.0)
+
+    lost = track.step * (1.0 / simulated - 1.0 / real)
+    needs = real ** 2 * track.curvature / GRAVITY
+    span = int(round(window / track.step))
+
+    rows = []
+    unclaimed = np.abs(result.speed_kph - real_kph)
+    for _ in range(count):
+        worst = int(np.argmax(unclaimed))
+        if unclaimed[worst] <= 0:
+            break
+        low = max(worst - span, 0)
+        high = min(worst + span + 1, len(real))
+        tightest = low + int(np.argmax(needs[low:high]))
+        rows.append({
+            'distance': float(track.distance[worst]),
+            'sim_kph': float(result.speed_kph[worst]),
+            'real_kph': float(real_kph[worst]),
+            'time': float(lost[low:high].sum()),
+            'needs_g': float(needs[tightest]),
+            'has_g': float(car.grip_force(real[tightest])
+                           / (car.mass * GRAVITY)),
+        })
+        unclaimed[low:high] = 0.0
+
+    return rows
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
@@ -761,19 +816,33 @@ if __name__ == '__main__':
     shared_values, cars, outcome = fit_multi(
         references, F1_2024, shared=('mu', 'drive_fraction'))
 
+    results = [simulate(reference.track, car)
+               for reference, car in zip(references, cars)]
+
     print("\nPer-circuit results:")
-    for reference, car in zip(references, cars):
-        result = simulate(reference.track, car)
+    for reference, result in zip(references, results):
         error = result.lap_time - reference.lap_time
         print(f"  {reference.track.name}: {result.lap_time:.3f}s "
               f"vs {reference.lap_time:.3f}s ({error:+.3f}s), "
               f"top {result.speed_kph.max():.0f} "
               f"vs {reference.speed_kph.max():.0f} km/h")
 
+    print("\nBiggest gaps (time is what the sim loses within 150m "
+          "either side):")
+    for reference, result in zip(references, results):
+        print(f"  {reference.track.name}:")
+        for row in biggest_gaps(result, reference):
+            flag = ("  <- more than the car has"
+                    if row['needs_g'] > row['has_g'] else "")
+            print(f"    {row['distance']:5.0f}m: sim {row['sim_kph']:3.0f} "
+                  f"vs real {row['real_kph']:3.0f} km/h, "
+                  f"{row['time']:+.2f}s, corner needs "
+                  f"{row['needs_g']:.1f}g, car has "
+                  f"{row['has_g']:.1f}g{flag}")
+
     fig, axes = plt.subplots(len(references), 1,
                              figsize=(13, 3 * len(references)))
-    for axis, reference, car in zip(axes, references, cars):
-        result = simulate(reference.track, car)
+    for axis, reference, result in zip(axes, references, results):
         axis.plot(reference.track.distance, reference.speed_kph,
                   color=style.DRIVER_A, label='Actual', linewidth=1.2)
         axis.plot(reference.track.distance, result.speed_kph,
