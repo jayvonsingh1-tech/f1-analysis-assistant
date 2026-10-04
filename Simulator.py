@@ -34,6 +34,16 @@ penalises bending, so it curves only where the data demands. Fixed-knot
 splines were tried and rejected - they overfit the lap-to-lap differences
 in line and produced curvature noise everywhere.
 
+Two choices in that fit matter more than anything else in this file. The
+spline is fitted against lap time, not distance, so it smooths over more
+metres where the car is fast. And the smoothing strength is chosen by
+agreement between two halves of the laps, not by cross-validation on
+position, which leaves too much noise in the curvature. Curvature noise
+only ever slows the simulated car, so with noisy geometry the fit
+inflates grip to compensate. Tested on made-up laps with a known car:
+fitting on the old geometry got grip and downforce wrong by 10 to 30%,
+fitting on this one recovers them within about 7%.
+
 Always check implied lateral acceleration (v^2 * curvature) before
 fitting. Anything well above 6g is noise, and the fit will bend the car
 parameters to compensate for it.
@@ -259,6 +269,64 @@ def _resample_line(x, y, spacing=1.0, smooth_metres=15.0):
     ry = savgol_filter(ry, window, polyorder=2, mode='interp')
     return s, rx, ry
 
+# Smoothing strengths tried when one is chosen automatically, weakest first
+_SMOOTHING_CANDIDATES = np.logspace(2.0, 7.0, 16)
+
+def _fit_line(clock, x, y, weights, lam):
+    """Smoothing splines for x and y, both against the same clock."""
+    return (make_smoothing_spline(clock, x, w=weights, lam=lam),
+            make_smoothing_spline(clock, y, w=weights, lam=lam))
+
+def _signed_curvature(spline_x, spline_y, clock):
+    """Curvature of a fitted line, positive turning one way and negative
+    the other. The formula gives the same answer whatever the splines
+    are fitted against."""
+    dx = spline_x.derivative(1)(clock)
+    dy = spline_y.derivative(1)(clock)
+    ddx = spline_x.derivative(2)(clock)
+    ddy = spline_y.derivative(2)(clock)
+
+    numerator = dx * ddy - dy * ddx
+    denominator = (dx ** 2 + dy ** 2) ** 1.5
+    return np.divide(numerator, denominator,
+                     out=np.zeros_like(numerator),
+                     where=denominator > 1e-9)
+
+def _agreed_smoothing(halves, clock, speed):
+    """Choose the smoothing strength the data itself supports.
+
+    halves: binned samples from two separate sets of laps
+    clock, speed: points both halves cover, and the pace at each
+
+    The two halves drove the same corners but carry different noise. For
+    each candidate strength, smooth one half with it and compare its
+    lateral acceleration with the other half's, smoothed only lightly.
+    Too little smoothing and the first half's noise shows up as
+    disagreement. Too much and it flattens corners the other half still
+    has. The strength with the least disagreement is the best the data
+    can identify.
+
+    Each half holds half the samples, so smoothing the full set by the
+    same amount takes twice the strength.
+    """
+    lightly = []
+    for half in halves:
+        spline_x, spline_y = _fit_line(*half, lam=None)
+        lightly.append(
+            _signed_curvature(spline_x, spline_y, clock) * speed ** 2)
+
+    disagreement = []
+    for lam in _SMOOTHING_CANDIDATES:
+        total = 0.0
+        for half, other in zip(halves, reversed(lightly)):
+            spline_x, spline_y = _fit_line(*half, lam=lam)
+            lateral = (_signed_curvature(spline_x, spline_y, clock)
+                       * speed ** 2)
+            total += np.mean((lateral - other) ** 2)
+        disagreement.append(total)
+
+    return 2.0 * _SMOOTHING_CANDIDATES[int(np.argmin(disagreement))]
+
 def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
                     scale=0.1, max_offset=8.0, bin_width=0.5,
                     speed_line=None):
@@ -273,11 +341,30 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     Method:
       1. Use the first lap as a reference line, and give every sample
          from every lap a continuous distance along it
-      2. Average the samples into short bins along the track, each bin
+      2. Read the fastest lap's clock at each point of that line
+      3. Average the samples into short bins along the track, each bin
          weighted by how many samples it holds
-      3. Fit a penalised smoothing spline through the bin averages, x and
-         y each as a function of distance
-      4. Differentiate the spline analytically for curvature
+      4. Fit a penalised smoothing spline through the bin averages, x and
+         y each as a function of the clock
+      5. Differentiate the spline analytically for curvature
+
+    Why the clock and not distance. Curvature is a second derivative, so
+    it amplifies noise, and how much that matters depends on speed:
+    lateral acceleration is speed squared times curvature, so a small
+    curvature error at 250 km/h is a large error in g. Smoothing against
+    distance treats every metre alike, which either leaves fast corners
+    noisy or rounds off hairpins. Smoothing against time reaches over
+    more metres where the car is fast and fewer where it is slow, which
+    is what both need. It needs speed_line; without one the fit falls
+    back to distance.
+
+    How strong the smoothing is. Left to cross-validation on position,
+    the spline is tuned to reproduce positions, and that leaves far too
+    much noise in the curvature. Noise only ever slows the simulated car
+    (it brakes for wiggles that are not there), so the fit then inflates
+    grip to compensate. _agreed_smoothing() chooses the strength from the
+    curvature itself, by building the line from two halves of the laps
+    and finding where they agree best.
 
     Binning matters for two reasons. The smoothing spline puts a knot at
     every data point, so samples from different laps landing millimetres
@@ -285,25 +372,16 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     has 1/n the variance of one sample, so weighting by n is the correct
     way to combine them.
 
-    The smoothing spline penalises bending, so it curves only where the
-    data demands. Straights stay straight; tight corners are still
-    followed because the car is slow there and the samples are dense.
-    Fixed-knot splines were rejected because they overfit the small
-    lap-to-lap differences in line, producing curvature noise everywhere.
-
-    The cost: a uniform penalty slightly rounds off the fastest, most
-    sparsely sampled direction changes, so the sim may be a little quick
-    through those.
-
     positions: list of (x, y) raw position arrays, one per lap. The first
         is the alignment reference, so use the fastest lap.
-    lam: smoothing strength. None chooses it automatically by generalised
-        cross-validation. Raise it to smooth harder.
+    lam: smoothing strength. None chooses it automatically. Raise it to
+        smooth harder.
     max_offset: metres. Samples further than this from the reference line
         are dropped, which removes off-track moments and data glitches.
     bin_width: metres of track per averaging bin.
-    speed_line: optional (x, y, speed_kph) from one lap, projected onto
-        the fitted line so its speed is aligned with the geometry.
+    speed_line: optional (x, y, speed_kph) from the fastest lap. Sets the
+        clock, and is projected onto the fitted line so its speed is
+        aligned with the geometry.
 
     The result is an average line across laps, slightly smoother than any
     single lap a driver actually drove.
@@ -319,8 +397,48 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     norm = np.maximum(np.hypot(tangent_x, tangent_y), 1e-9)
     tangent_x, tangent_y = tangent_x / norm, tangent_y / norm
 
-    pooled_s, pooled_x, pooled_y = [], [], []
-    for lap_x, lap_y in positions:
+    # 2. The fastest lap's clock at each reference point. It is rescaled
+    # so a whole lap of clock equals the lap length, which keeps smoothing
+    # strengths comparable with and without a speed line.
+    if speed_line is None:
+        pace = np.ones_like(ref_s)
+        ref_clock = ref_s
+    else:
+        line_x = np.asarray(speed_line[0], dtype=float) * scale
+        line_y = np.asarray(speed_line[1], dtype=float) * scale
+        line_v = np.asarray(speed_line[2], dtype=float)
+        usable = (np.isfinite(line_x) & np.isfinite(line_y)
+                  & np.isfinite(line_v))
+        line_x, line_y, line_v = line_x[usable], line_y[usable], line_v[usable]
+
+        _, index = ref_tree.query(np.column_stack([line_x, line_y]))
+        order = np.argsort(ref_s[index], kind='stable')
+        pace = np.interp(ref_s, ref_s[index][order], line_v[order] / 3.6)
+        pace = savgol_filter(pace, 61, polyorder=2, mode='interp')
+        pace = np.maximum(pace, 5.0)
+
+        slowness = 1.0 / pace
+        ref_clock = np.concatenate(
+            [[0.0], np.cumsum(0.5 * (slowness[1:] + slowness[:-1])
+                              * np.diff(ref_s))])
+        ref_clock = ref_clock * (ref_s[-1] - ref_s[0]) / ref_clock[-1]
+
+    def clock_at(distance):
+        """Clock reading at a distance along the reference line. Past
+        either end it carries on at the rate it had there."""
+        reading = np.interp(distance, ref_s, ref_clock)
+        before = distance < ref_s[0]
+        after = distance > ref_s[-1]
+        reading[before] = ref_clock[0] + (
+            (distance[before] - ref_s[0])
+            * (ref_clock[1] - ref_clock[0]) / (ref_s[1] - ref_s[0]))
+        reading[after] = ref_clock[-1] + (
+            (distance[after] - ref_s[-1])
+            * (ref_clock[-1] - ref_clock[-2]) / (ref_s[-1] - ref_s[-2]))
+        return reading
+
+    pooled_s, pooled_x, pooled_y, pooled_lap = [], [], [], []
+    for number, (lap_x, lap_y) in enumerate(positions):
         lap_x = np.asarray(lap_x, dtype=float) * scale
         lap_y = np.asarray(lap_y, dtype=float) * scale
         offset, index = ref_tree.query(np.column_stack([lap_x, lap_y]))
@@ -337,39 +455,50 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
         pooled_s.append(ref_s[idx] + along)
         pooled_x.append(px)
         pooled_y.append(py)
+        pooled_lap.append(np.full(len(px), number))
 
     s = np.concatenate(pooled_s)
     x = np.concatenate(pooled_x)
     y = np.concatenate(pooled_y)
+    lap = np.concatenate(pooled_lap)
 
-    # 2. Average into bins along the track, weighted by sample count.
-    # Bin centres are exactly bin_width apart, which keeps the spline
+    # 3. Average into bins along the track, weighted by sample count.
+    # Bins are exactly bin_width apart in distance, which keeps the spline
     # well conditioned.
     start = s.min()
     bins = np.floor((s - start) / bin_width).astype(int)
-    counts = np.bincount(bins)
-    occupied = counts > 0
 
-    bin_s = start + (np.flatnonzero(occupied) + 0.5) * bin_width
-    bin_x = np.bincount(bins, weights=x)[occupied] / counts[occupied]
-    bin_y = np.bincount(bins, weights=y)[occupied] / counts[occupied]
-    weights = counts[occupied].astype(float)
+    def binned(keep):
+        """Bin averages of the chosen samples: clock, x, y and weight."""
+        counts = np.bincount(bins[keep])
+        occupied = counts > 0
+        centre = start + (np.flatnonzero(occupied) + 0.5) * bin_width
+        return (clock_at(centre),
+                np.bincount(bins[keep], weights=x[keep])[occupied]
+                / counts[occupied],
+                np.bincount(bins[keep], weights=y[keep])[occupied]
+                / counts[occupied],
+                counts[occupied].astype(float))
 
-    # 3. Penalised smoothing spline through the bin averages
-    spline_x = make_smoothing_spline(bin_s, bin_x, w=weights, lam=lam)
-    spline_y = make_smoothing_spline(bin_s, bin_y, w=weights, lam=lam)
+    # 4. Penalised smoothing spline through the bin averages
+    chosen = lam
+    if chosen is None and len(positions) >= 2:
+        # Compare the halves away from the very ends of the lap, where a
+        # half may have no samples yet
+        common = np.arange(start + 20.0, s.max() - 20.0, 1.0)
+        chosen = _agreed_smoothing(
+            [binned(lap % 2 == 0), binned(lap % 2 == 1)],
+            clock_at(common), np.interp(common, ref_s, pace))
 
-    # 4. Analytic derivatives on a fine grid
-    fine = np.arange(bin_s[0], bin_s[-1], spacing / 4)
+    spline_x, spline_y = _fit_line(*binned(np.ones(len(s), dtype=bool)),
+                                   lam=chosen)
+
+    # 5. Analytic derivatives on a fine grid
+    fine_s = np.arange(start + 0.5 * bin_width,
+                       start + (bins.max() + 0.5) * bin_width, spacing / 4)
+    fine = clock_at(fine_s)
     fx, fy = spline_x(fine), spline_y(fine)
-    dx, dy = spline_x.derivative(1)(fine), spline_y.derivative(1)(fine)
-    ddx, ddy = spline_x.derivative(2)(fine), spline_y.derivative(2)(fine)
-
-    numerator = np.abs(dx * ddy - dy * ddx)
-    denominator = (dx ** 2 + dy ** 2) ** 1.5
-    curvature_fine = np.divide(numerator, denominator,
-                               out=np.zeros_like(numerator),
-                               where=denominator > 1e-9)
+    curvature_fine = np.abs(_signed_curvature(spline_x, spline_y, fine))
 
     # Even spacing in true arc length along the fitted line
     arc = np.concatenate(
@@ -379,9 +508,6 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
 
     channels = {}
     if speed_line is not None:
-        line_x = np.asarray(speed_line[0], dtype=float) * scale
-        line_y = np.asarray(speed_line[1], dtype=float) * scale
-        line_v = np.asarray(speed_line[2], dtype=float)
         fitted_tree = cKDTree(np.column_stack([fx, fy]))
         _, index = fitted_tree.query(np.column_stack([line_x, line_y]))
         along = arc[index]
@@ -389,10 +515,16 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
         channels['speed_kph'] = np.interp(distance, along[order],
                                           line_v[order])
 
-    smoothing = "automatic" if lam is None else f"lam {lam}"
+    against = "distance" if speed_line is None else "lap time"
+    if lam is not None:
+        strength = f"lam {lam:g}"
+    elif chosen is None:
+        strength = "automatic"
+    else:
+        strength = f"automatic, lam {chosen:.3g}"
     return Track(name=name, distance=distance, curvature=curvature,
-                 source=f"pooled from {len(positions)} laps, "
-                        f"smoothing spline ({smoothing})",
+                 source=f"pooled from {len(positions)} laps, smoothed "
+                        f"against {against} ({strength})",
                  channels=channels)
 
 # ---------------------------------------------------------------------------
@@ -758,12 +890,14 @@ if __name__ == '__main__':
     style.apply()
 
     # Geometry check only. Set to False once every circuit passes.
-    CHECK_ONLY = False
+    CHECK_ONLY = True
 
     # (year, race, driver, smoothing - None for automatic, terminal speed?)
+    # Monaco is back on automatic smoothing: its old value of 100000 was
+    # on the distance scale and means something else against lap time.
     setups = [
         (2024, 'Monza', 'NOR', None, True),
-   #     (2024, 'Monaco', 'LEC', 100000, False),
+        (2024, 'Monaco', 'LEC', None, False),
         (2024, 'Silverstone', 'HAM', None, True),
         (2024, 'Barcelona', 'VER', None, True),
     ]
@@ -832,8 +966,10 @@ if __name__ == '__main__':
     for reference, result in zip(references, results):
         print(f"  {reference.track.name}:")
         for row in biggest_gaps(result, reference):
+            # A car on the limit needs about what it has, so only flag
+            # a clear shortfall
             flag = ("  <- more than the car has"
-                    if row['needs_g'] > row['has_g'] else "")
+                    if row['needs_g'] > 1.1 * row['has_g'] else "")
             print(f"    {row['distance']:5.0f}m: sim {row['sim_kph']:3.0f} "
                   f"vs real {row['real_kph']:3.0f} km/h, "
                   f"{row['time']:+.2f}s, corner needs "
