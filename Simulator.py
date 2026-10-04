@@ -63,6 +63,13 @@ Fitting a single circuit is underdetermined - many parameter sets produce
 the same lap time. fit_multi() fits several circuits at once, sharing tyre
 parameters while letting aero vary per circuit.
 
+Even then tyre grip and downforce trade off against each other: more of
+one and less of the other gives nearly the same laps. So the error has a
+long shallow valley, and an optimiser that stops anywhere along it looks
+converged when it is not. fit_multi() solves the fit as a least-squares
+problem, which follows the valley to its lowest point, and checks itself
+from a second starting point.
+
 SPEED
 
 A fit runs thousands of laps, so simulate() has to be quick. Its two
@@ -79,7 +86,7 @@ from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
 from scipy.interpolate import make_smoothing_spline
-from scipy.optimize import minimize
+from scipy.optimize import least_squares
 from scipy.signal import savgol_filter
 from scipy.spatial import cKDTree
 
@@ -691,7 +698,10 @@ class Reference:
     drag_limited: bool = True    # does the car reach terminal speed here?
 
 def lap_error(track, car, reference):
-    """Dimensionless error between a simulated and a real lap.
+    """One number for how far a simulated lap is from the real one.
+
+    Used to report a fit, and kept the same so results stay comparable
+    from one run to the next. The fit itself minimises lap_residuals().
 
     Weighted towards the speed trace, which is far harder to fake than a
     single lap time. Top speed gets its own term only where the car
@@ -719,6 +729,37 @@ def lap_error(track, car, reference):
 
     return error, result
 
+def lap_residuals(track, car, reference, time_weight=1.0, top_weight=3.0):
+    """Every way a simulated lap differs from the real one, as one array.
+
+    A least-squares fit makes the sum of these squared as small as it
+    can, so each kind of difference is scaled to count the right amount:
+      - the relative speed error at every point, scaled so that together
+        they add up to the mean squared speed error
+      - the relative lap-time error, times time_weight
+      - the relative top-speed error, times top_weight, only where the
+        car reaches terminal speed (see lap_error)
+
+    The speed trace carries most of the weight. The top-speed term is
+    weighted up because top speed is what pins the drag.
+    """
+    actual = reference.speed_kph / 3.6
+    try:
+        result = simulate(track, car)
+    except Exception:
+        return np.ones(len(actual) + 2)
+
+    speed = ((result.speed - actual) / np.maximum(actual, 1.0)
+             / math.sqrt(len(actual)))
+    timing = (time_weight * (result.lap_time - reference.lap_time)
+              / reference.lap_time)
+    top = 0.0
+    if reference.drag_limited:
+        top = (top_weight * (result.speed.max() - actual.max())
+               / actual.max())
+
+    return np.concatenate([speed, [timing, top]])
+
 SHARED_BOUNDS = {
     'mu': (1.0, 2.5),
     'load_sensitivity': (0.0, 0.4),
@@ -731,66 +772,121 @@ AERO_BOUNDS = {
 }
 
 def fit_multi(references, base_car,
-              shared=('mu', 'load_sensitivity', 'drive_fraction',
-                      'brake_limit'),
+              shared=('mu', 'drive_fraction'),
               per_circuit=('cla', 'cda'),
-              verbose=True, maxiter=300):
+              verbose=True):
     """Fit one car across several circuits at once.
 
     Tyre and drivetrain parameters are shared, because they don't change
     between races. Aero is fitted per circuit, because teams genuinely run
     different wing levels.
 
+    Solved as a least-squares problem on lap_residuals(), with a
+    trust-region method. The choice matters. A general-purpose minimiser
+    working on one error number stalled part-way, stopped at a different
+    place for every starting point, and used thousands of laps doing it.
+    This one reaches the same answer from any start in a couple of
+    hundred laps. To prove it on the day, the fit is run from two very
+    different starting points and the two answers are compared.
+
+    Only fit what the laps can pin down. Tested on made-up laps with a
+    known car: load_sensitivity trades off against downforce and comes
+    out badly wrong, and brake_limit hardly changes a lap, so both are
+    better held at an assumed value than fitted.
+
     Returns (shared_values, per_circuit_cars, outcome)
     """
     n = len(references)
+    fitted = tuple(shared) + tuple(per_circuit)
 
-    start = ([getattr(base_car, name) for name in shared]
-             + [getattr(base_car, name) for _ in range(n)
-                for name in per_circuit])
-
-    limits = ([SHARED_BOUNDS[name] for name in shared]
-              + [AERO_BOUNDS[name] for _ in range(n)
-                 for name in per_circuit])
+    lower = np.array([SHARED_BOUNDS[name][0] for name in shared]
+                     + [AERO_BOUNDS[name][0] for _ in range(n)
+                        for name in per_circuit])
+    upper = np.array([SHARED_BOUNDS[name][1] for name in shared]
+                     + [AERO_BOUNDS[name][1] for _ in range(n)
+                        for name in per_circuit])
 
     def unpack(values):
-        shared_values = dict(zip(shared, values[:len(shared)]))
+        shared_values = {name: float(value) for name, value
+                         in zip(shared, values[:len(shared)])}
         cars = []
         cursor = len(shared)
         for _ in range(n):
-            aero = dict(zip(per_circuit,
-                            values[cursor:cursor + len(per_circuit)]))
+            aero = {name: float(value) for name, value
+                    in zip(per_circuit,
+                           values[cursor:cursor + len(per_circuit)])}
             cursor += len(per_circuit)
             cars.append(replace(base_car, **shared_values, **aero))
         return shared_values, cars
 
-    def total_error(values):
-        _, cars = unpack(values)
-        total = 0.0
-        for reference, car in zip(references, cars):
-            error, _ = lap_error(reference.track, car, reference)
-            total += error
-        return total / n
+    # A circuit only needs simulating again when one of its own numbers
+    # changes. The solver nudges one number at a time, so remembering
+    # each circuit's laps saves most of the work.
+    seen = {}
 
-    outcome = minimize(total_error, start, bounds=limits,
-                       method='L-BFGS-B', options={'maxiter': maxiter})
+    def residuals(values):
+        _, cars = unpack(values)
+        parts = []
+        for index, (reference, car) in enumerate(zip(references, cars)):
+            key = (index,) + tuple(getattr(car, name) for name in fitted)
+            if key not in seen:
+                seen[key] = lap_residuals(reference.track, car, reference)
+            parts.append(seen[key])
+        return np.concatenate(parts)
+
+    def solve(start):
+        # The solver needs to start strictly inside the bounds
+        margin = 1e-6 * (upper - lower)
+        start = np.clip(start, lower + margin, upper - margin)
+        return least_squares(residuals, start, bounds=(lower, upper),
+                             x_scale='jac', diff_step=1e-3)
+
+    outcome = solve(np.array(
+        [getattr(base_car, name) for name in shared]
+        + [getattr(base_car, name) for _ in range(n)
+           for name in per_circuit]))
+
+    # The same fit again from somewhere very different: plenty of tyre
+    # grip and little downforce. Agreement shows the answer comes from
+    # the data and not from where the search began.
+    span = upper - lower
+    far = lower + 0.2 * span
+    far[:len(shared)] = (lower + 0.8 * span)[:len(shared)]
+    second = solve(far)
+
+    gap = float(np.max(np.abs(second.x - outcome.x) / span))
+    if second.cost < outcome.cost:
+        outcome = second
 
     shared_values, cars = unpack(outcome.x)
 
     if verbose:
-        print(f"\nMulti-circuit fit ({outcome.nit} iterations, "
-              f"mean error {outcome.fun:.4f})")
+        mean_error = np.mean([lap_error(reference.track, car, reference)[0]
+                              for reference, car in zip(references, cars)])
+        print(f"\nMulti-circuit fit ({len(seen)} laps simulated, "
+              f"mean error {mean_error:.4f})")
+        if gap < 0.01:
+            print("  A second starting point gave the same answer.")
+        else:
+            print(f"  WARNING: a second starting point gave a different "
+                  f"answer, up to {gap:.0%} of a parameter's range away. "
+                  f"The better of the two is shown. Treat it with care.")
+
+        def at_bound(value, bounds):
+            low, high = bounds
+            return ("  <- at bound"
+                    if min(value - low, high - value) < 1e-3 else "")
+
         print("\n  Shared (tyres and drivetrain):")
         for name, value in shared_values.items():
-            low, high = SHARED_BOUNDS[name]
-            flag = ("  <- at bound"
-                    if min(value - low, high - value) < 1e-3 else "")
             print(f"    {name}: {getattr(base_car, name):.3f} "
-                  f"-> {value:.3f}{flag}")
+                  f"-> {value:.3f}{at_bound(value, SHARED_BOUNDS[name])}")
         print("\n  Per circuit (aero):")
         for reference, car in zip(references, cars):
             print(f"    {reference.track.name}: "
                   + ", ".join(f"{name} {getattr(car, name):.3f}"
+                              + at_bound(getattr(car, name),
+                                         AERO_BOUNDS[name])
                               for name in per_circuit))
 
     return shared_values, cars, outcome
