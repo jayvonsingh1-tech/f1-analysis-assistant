@@ -708,7 +708,7 @@ if __name__ == '__main__':
     # (year, race, driver, smoothing - None for automatic, terminal speed?)
     setups = [
         (2024, 'Monza', 'NOR', None, True),
-        (2024, 'Monaco', 'LEC', 100000, False),
+   #     (2024, 'Monaco', 'LEC', 100000, False),
         (2024, 'Silverstone', 'HAM', None, True),
         (2024, 'Barcelona', 'VER', None, True),
     ]
