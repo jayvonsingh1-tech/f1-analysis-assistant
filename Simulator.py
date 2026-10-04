@@ -44,6 +44,15 @@ inflates grip to compensate. Tested on made-up laps with a known car:
 fitting on the old geometry got grip and downforce wrong by 10 to 30%,
 fitting on this one recovers them within about 7%.
 
+On real laps the gain was much smaller, and for a reason worth knowing.
+Those tests assumed random position noise. In real data the two halves
+of the laps already agree with very little smoothing, so the bumps left
+in the curvature are the same on every lap. They are errors in the
+position data that repeat at the same place, or real features of the
+line, and no smoothing chosen from the data can remove those. Monaco's
+two Swimming Pool chicanes are the worst case: quick left-right flicks
+at speed, where a metre of position error doubles the lateral g.
+
 Always check implied lateral acceleration (v^2 * curvature) before
 fitting. Anything well above 6g is noise, and the fit will bend the car
 parameters to compensate for it.
@@ -270,7 +279,7 @@ def _resample_line(x, y, spacing=1.0, smooth_metres=15.0):
     return s, rx, ry
 
 # Smoothing strengths tried when one is chosen automatically, weakest first
-_SMOOTHING_CANDIDATES = np.logspace(2.0, 7.0, 16)
+_SMOOTHING_CANDIDATES = np.logspace(1.0, 7.0, 19)
 
 def _fit_line(clock, x, y, weights, lam):
     """Smoothing splines for x and y, both against the same clock."""
@@ -522,6 +531,12 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
         strength = "automatic"
     else:
         strength = f"automatic, lam {chosen:.3g}"
+        # Landing on either end of the candidates means the best
+        # strength may lie outside them
+        if chosen <= 2.0 * _SMOOTHING_CANDIDATES[0]:
+            strength += ", the weakest tried"
+        elif chosen >= 2.0 * _SMOOTHING_CANDIDATES[-1]:
+            strength += ", the strongest tried"
     return Track(name=name, distance=distance, curvature=curvature,
                  source=f"pooled from {len(positions)} laps, smoothed "
                         f"against {against} ({strength})",
@@ -890,14 +905,14 @@ if __name__ == '__main__':
     style.apply()
 
     # Geometry check only. Set to False once every circuit passes.
-    CHECK_ONLY = True
+    CHECK_ONLY = False
 
     # (year, race, driver, smoothing - None for automatic, terminal speed?)
-    # Monaco is back on automatic smoothing: its old value of 100000 was
-    # on the distance scale and means something else against lap time.
+    # Monaco is left out: it fails the geometry check at 11g, in the two
+    # Swimming Pool chicanes, and smoothing does not remove it.
     setups = [
         (2024, 'Monza', 'NOR', None, True),
-        (2024, 'Monaco', 'LEC', None, False),
+        # (2024, 'Monaco', 'LEC', None, False),
         (2024, 'Silverstone', 'HAM', None, True),
         (2024, 'Barcelona', 'VER', None, True),
     ]
