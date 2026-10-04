@@ -81,6 +81,19 @@ converged when it is not. fit_multi() solves the fit as a least-squares
 problem, which follows the valley to its lowest point, and checks itself
 from a second starting point.
 
+STEPPING
+
+simulate() works along the lap in steps of one grid spacing, and the
+acceleration changes within a step: the corner tightens or opens, and
+the car gains or loses speed. Using the acceleration at the start of
+each step, as this file once did, is the obvious way and it is biased:
+every lap came out 0.1 to 0.35s too slow at 1m spacing, more on a
+twisty circuit, purely from the arithmetic. Using the acceleration
+half-way along each step removes nearly all of that for the same amount
+of work. Against the same lap computed with 0.05m steps, 1m steps are
+now within 0.01 to 0.08s. What a setup change is worth was never much
+affected, because the bias was nearly the same for both cars compared.
+
 SPEED
 
 A fit runs thousands of laps, so simulate() has to be quick. Its two
@@ -564,30 +577,35 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
 # Physics
 # ---------------------------------------------------------------------------
 
-def cornering_limit(track, car, iterations=25):
+def _terminal_speed(car):
+    """Top speed, where all the power goes into beating drag."""
+    return (car.power / (0.5 * AIR_DENSITY * car.cda)) ** (1 / 3)
+
+def cornering_limit(track, car, halvings=30):
     """Maximum speed at each point, set by lateral grip.
 
-    With load-sensitive tyres mu depends on speed, so the balance is
-    implicit. Solved by damped fixed-point iteration.
+    The car can hold a speed through a point if its grip is at least
+    the force the turn needs: grip(v) >= mass * v^2 * curvature. Grip
+    depends on speed too (downforce, and load-sensitive tyres), so there
+    is no formula for the answer. It is found by halving: take the range
+    from standstill to top speed, test the middle, keep the half the
+    answer lies in, and repeat. Thirty halvings pin it to a ten-millionth
+    of a metre per second.
+
+    Where the car could corner faster than it can ever go, the answer
+    is its top speed.
     """
-    radius = track.radius
-    finite = np.isfinite(radius) & (radius > 0)
+    curvature = track.curvature
+    low = np.zeros_like(curvature)
+    high = np.full_like(curvature, _terminal_speed(car))
 
-    speed = np.full_like(radius, 100.0)
-    speed[~finite] = np.inf
+    for _ in range(halvings):
+        middle = 0.5 * (low + high)
+        holds = car.grip_force(middle) >= car.mass * middle ** 2 * curvature
+        low = np.where(holds, middle, low)
+        high = np.where(holds, high, middle)
 
-    for _ in range(iterations):
-        current = np.where(finite, speed, 0.0)
-        grip = car.grip_force(current)
-
-        new_squared = np.divide(grip * radius, car.mass,
-                                out=np.zeros_like(radius),
-                                where=finite)
-        new = np.sqrt(np.maximum(new_squared, 0.0))
-
-        speed = np.where(finite, 0.5 * speed + 0.5 * new, np.inf)
-
-    return speed
+    return 0.5 * (low + high)
 
 def available_longitudinal(car, speed, curvature, braking=False):
     """Longitudinal acceleration available at one point, in m/s2.
@@ -622,10 +640,6 @@ def available_longitudinal(car, speed, curvature, braking=False):
     force = min(traction_limit, power_limit) - drag
     return force / car.mass
 
-def _terminal_speed(car):
-    """Top speed where power equals drag."""
-    return (car.power / (0.5 * AIR_DENSITY * car.cda)) ** (1 / 3)
-
 def simulate(track, car, initial_speed=None, periodic=False):
     """Run a quasi-steady-state lap simulation.
 
@@ -644,7 +658,6 @@ def simulate(track, car, initial_speed=None, periodic=False):
     points = len(track.distance)
 
     corner_speed = cornering_limit(track, car)
-    corner_speed = np.minimum(corner_speed, _terminal_speed(car))
 
     if initial_speed is None and 'speed_kph' in track.channels:
         initial_speed = float(track.channels['speed_kph'][0]) / 3.6
@@ -652,26 +665,42 @@ def simulate(track, car, initial_speed=None, periodic=False):
     # The sweeps below step through the lap one point at a time, so they
     # read from plain Python lists rather than numpy arrays (see SPEED in
     # the notes at the top of this file).
-    curvature = track.curvature.tolist()
     corner_cap = corner_speed.tolist()
 
+    # Curvature half-way between each point and the next
+    halfway_curvature = (0.5 * (track.curvature[1:]
+                                + track.curvature[:-1])).tolist()
+
     def one_pass(start):
+        # Each step uses the acceleration available half-way along it
+        # (see STEPPING in the notes at the top of this file). The
+        # speed there is not known yet, so it is predicted: v^2 changes
+        # by 2 x acceleration x distance, and over half a step the car
+        # is assumed to keep the acceleration it had on the last one.
+        # previous and ahead hold speed squared.
         forward = [0.0] * points
         forward[0] = min(float(start), corner_cap[0])
+        acceleration = 0.0
         for i in range(1, points):
-            previous = forward[i - 1]
+            previous = forward[i - 1] ** 2
+            halfway = math.sqrt(max(previous + acceleration * step, 1.0))
             acceleration = available_longitudinal(
-                car, previous, curvature[i - 1], braking=False)
-            squared = previous ** 2 + 2 * acceleration * step
+                car, halfway, halfway_curvature[i - 1], braking=False)
+            squared = previous + 2 * acceleration * step
             forward[i] = min(math.sqrt(max(squared, 1.0)), corner_cap[i])
 
+        # The same thing backwards from the end of the lap, under
+        # braking: how fast could the car have been going one step
+        # earlier and still be down to this speed here?
         backward = [0.0] * points
         backward[-1] = corner_cap[-1]
+        deceleration = 0.0
         for i in range(points - 2, -1, -1):
-            ahead = backward[i + 1]
+            ahead = backward[i + 1] ** 2
+            halfway = math.sqrt(max(ahead + deceleration * step, 1.0))
             deceleration = available_longitudinal(
-                car, ahead, curvature[i + 1], braking=True)
-            squared = ahead ** 2 + 2 * deceleration * step
+                car, halfway, halfway_curvature[i], braking=True)
+            squared = ahead + 2 * deceleration * step
             backward[i] = min(math.sqrt(max(squared, 1.0)), corner_cap[i])
 
         return np.array(forward), np.array(backward)
@@ -685,11 +714,15 @@ def simulate(track, car, initial_speed=None, periodic=False):
 
     speed = np.minimum(np.minimum(forward, backward), corner_speed)
 
+    # What sets the speed at each point: the corner itself, braking for
+    # a corner ahead, or how hard the car can accelerate. In a long
+    # corner the car sits a shade under the limit, holding its speed
+    # against drag, so 'corner' allows 1%. A point where the car could
+    # corner at top speed is not limited by the corner.
     limit = np.full(points, 'power', dtype=object)
-    at_corner = np.isclose(speed, corner_speed, rtol=0.01)
-    at_brake = np.isclose(speed, backward, rtol=0.01) & ~at_corner
-    limit[at_corner] = 'corner'
-    limit[at_brake] = 'brake'
+    limit[backward < forward] = 'brake'
+    limit[np.isclose(speed, corner_speed, rtol=0.01)
+          & (corner_speed < 0.999 * _terminal_speed(car))] = 'corner'
 
     lap_time = float(np.sum(step / np.maximum(speed, 1.0)))
 
