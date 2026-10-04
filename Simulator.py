@@ -43,9 +43,20 @@ FITTING
 Fitting a single circuit is underdetermined - many parameter sets produce
 the same lap time. fit_multi() fits several circuits at once, sharing tyre
 parameters while letting aero vary per circuit.
+
+SPEED
+
+A fit runs thousands of laps, so simulate() has to be quick. Its two
+sweeps step through the lap one point at a time, and numpy is fast on
+whole arrays but slow when called on a single number. So the sweeps and
+available_longitudinal() work on plain Python floats, and the Car methods
+use only plain arithmetic, which works on one float or a whole array
+alike. Keep numpy calls out of that path. cornering_limit() handles the
+whole lap at once, so it uses numpy arrays.
 """
 
-from dataclasses import dataclass, field, replace
+import math
+from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
 from scipy.interpolate import make_smoothing_spline
@@ -76,6 +87,14 @@ class Car:
     max_tractive_force: float = 1e9   # N, torque limit at low speed
     drs_cda_delta: float = 0.0        # drag reduction when DRS is open
 
+    def __post_init__(self):
+        # Store plain Python numbers. The optimiser hands over numpy ones,
+        # which give the same answers but make simulate() far slower.
+        for item in fields(self):
+            value = getattr(self, item.name)
+            if isinstance(value, np.generic):
+                setattr(self, item.name, value.item())
+
     def downforce(self, speed):
         return 0.5 * AIR_DENSITY * self.cla * speed ** 2
 
@@ -95,8 +114,9 @@ class Car:
         if self.load_sensitivity <= 0:
             return self.mu
 
+        # Load is weight plus downforce, so this ratio is always positive
         load_per_tyre = self.normal_load(speed) / 4.0
-        ratio = np.maximum(load_per_tyre / self.reference_load, 1e-6)
+        ratio = load_per_tyre / self.reference_load
         return self.mu * ratio ** (-self.load_sensitivity)
 
     def grip_force(self, speed):
@@ -405,16 +425,21 @@ def cornering_limit(track, car, iterations=25):
     return speed
 
 def available_longitudinal(car, speed, curvature, braking=False):
-    """Longitudinal acceleration available, in m/s2.
+    """Longitudinal acceleration available at one point, in m/s2.
 
     One grip budget shared between cornering and accelerating or braking,
     via a friction ellipse.
+
+    speed and curvature are single numbers, not arrays. simulate() calls
+    this for every point of the lap in both directions, so it uses
+    Python's own min, max and math.sqrt, which are far quicker than the
+    numpy versions on one number.
     """
     grip = car.grip_force(speed)
 
     lateral_force = car.mass * speed ** 2 * curvature
-    used = np.clip(lateral_force / np.maximum(grip, 1e-9), 0.0, 1.0)
-    remaining = np.sqrt(np.maximum(0.0, 1.0 - used ** 2))
+    used = min(max(lateral_force / max(grip, 1e-9), 0.0), 1.0)
+    remaining = math.sqrt(max(1.0 - used ** 2, 0.0))
 
     drag = car.drag(speed)
 
@@ -422,15 +447,14 @@ def available_longitudinal(car, speed, curvature, braking=False):
         # All four tyres brake, and drag helps
         tyre_limit = grip * remaining
         mechanical_limit = car.brake_limit * car.mass * GRAVITY
-        force = np.minimum(tyre_limit, mechanical_limit) + drag
+        force = min(tyre_limit, mechanical_limit) + drag
         return force / car.mass
 
     # Only the driven axle puts power down. P/v is unbounded as speed
     # approaches zero, but real cars are torque-limited there, so cap it.
     traction_limit = grip * remaining * car.drive_fraction
-    power_limit = np.minimum(car.power / np.maximum(speed, 1.0),
-                             car.max_tractive_force)
-    force = np.minimum(traction_limit, power_limit) - drag
+    power_limit = min(car.power / max(speed, 1.0), car.max_tractive_force)
+    force = min(traction_limit, power_limit) - drag
     return force / car.mass
 
 def _terminal_speed(car):
@@ -452,7 +476,6 @@ def simulate(track, car, initial_speed=None, periodic=False):
       4. otherwise the cornering limit at the start
     """
     step = track.step
-    curvature = track.curvature
     points = len(track.distance)
 
     corner_speed = cornering_limit(track, car)
@@ -461,24 +484,32 @@ def simulate(track, car, initial_speed=None, periodic=False):
     if initial_speed is None and 'speed_kph' in track.channels:
         initial_speed = float(track.channels['speed_kph'][0]) / 3.6
 
+    # The sweeps below step through the lap one point at a time, so they
+    # read from plain Python lists rather than numpy arrays (see SPEED in
+    # the notes at the top of this file).
+    curvature = track.curvature.tolist()
+    corner_cap = corner_speed.tolist()
+
     def one_pass(start):
-        forward = np.empty(points)
-        forward[0] = min(start, corner_speed[0])
+        forward = [0.0] * points
+        forward[0] = min(float(start), corner_cap[0])
         for i in range(1, points):
+            previous = forward[i - 1]
             acceleration = available_longitudinal(
-                car, forward[i - 1], curvature[i - 1], braking=False)
-            squared = forward[i - 1] ** 2 + 2 * acceleration * step
-            forward[i] = min(np.sqrt(max(squared, 1.0)), corner_speed[i])
+                car, previous, curvature[i - 1], braking=False)
+            squared = previous ** 2 + 2 * acceleration * step
+            forward[i] = min(math.sqrt(max(squared, 1.0)), corner_cap[i])
 
-        backward = np.empty(points)
-        backward[-1] = corner_speed[-1]
+        backward = [0.0] * points
+        backward[-1] = corner_cap[-1]
         for i in range(points - 2, -1, -1):
+            ahead = backward[i + 1]
             deceleration = available_longitudinal(
-                car, backward[i + 1], curvature[i + 1], braking=True)
-            squared = backward[i + 1] ** 2 + 2 * deceleration * step
-            backward[i] = min(np.sqrt(max(squared, 1.0)), corner_speed[i])
+                car, ahead, curvature[i + 1], braking=True)
+            squared = ahead ** 2 + 2 * deceleration * step
+            backward[i] = min(math.sqrt(max(squared, 1.0)), corner_cap[i])
 
-        return forward, backward
+        return np.array(forward), np.array(backward)
 
     start = corner_speed[0] if initial_speed is None else initial_speed
     forward, backward = one_pass(start)
