@@ -963,6 +963,7 @@ class Reference:
     stream_offset: float = None  # seconds the speed clock was corrected by
     clock: str = ""              # what was found about the two clocks
     lap_choice: str = "lap"      # which lap this is, and why that one
+    driver: str = ""             # whose lap it is, as a three-letter code
     eased: str = ""              # where the map was eased, if anywhere
     notes: list = field(default_factory=list)   # problems found in the data
 
@@ -1574,17 +1575,34 @@ def _eased(track, speed_kph, most_g, longest=50.0):
     return (replace(track, curvature=curvature, channels=channels), said,
             left)
 
-def build_reference(year, race, driver, spacing=1.0, lam=None,
+def _fastest_driver(laps):
+    """The three-letter code of whoever set the fastest lap in `laps`.
+
+    FastF1's pick_fastest() takes the quickest lap that counted. A lap
+    time that was deleted, for leaving the track say, does not.
+    """
+    lap = laps.pick_fastest()
+    if lap is None:
+        raise ValueError("No lap in this session is marked as a fastest "
+                         "lap, so there is none to take. Name the driver "
+                         "instead.")
+    return str(lap['Driver'])
+
+def build_reference(year, race, driver=None, spacing=1.0, lam=None,
                     max_laps=60, drag_limited=True,
                     most_g=MOST_LATERAL_G):
     """Load a driver's laps and prepare a reference for fitting.
 
+    driver is a three-letter code such as 'NOR'. Left out, it is whoever
+    set the fastest lap of the race. The reference's `driver` says who
+    that was.
+
     Geometry is pooled from up to max_laps clean laps. Every lap lies on
     the same map path whatever the tyres or the fuel load, so any clean
-    lap will do. Speed comes from one lap alone: the quickest with DRS
-    shut. Its clock is lined up with the position data's first (see
-    _stream_offset), and each speed sample is then placed on the track
-    by how far the car had travelled (see _speed_by_distance).
+    lap will do. Speed comes from one lap alone: the driver's quickest
+    with DRS shut. Its clock is lined up with the position data's first
+    (see _stream_offset), and each speed sample is then placed on the
+    track by how far the car had travelled (see _speed_by_distance).
 
     Last, kinks in the map are eased: short stretches where it asks for
     more than most_g of sideways acceleration at the speed the real car
@@ -1593,6 +1611,8 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
     import telemetry
 
     session = telemetry.load_session(year, race)
+    if driver is None:
+        driver = _fastest_driver(session.laps)
     laps = session.laps.pick_drivers(driver).pick_quicklaps().pick_wo_box()
 
     def seconds(column):
@@ -1826,6 +1846,7 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
                      stream_offset=stream_offset,
                      clock=clock,
                      lap_choice=lap_choice,
+                     driver=driver,
                      eased=eased,
                      notes=notes)
 
@@ -1954,24 +1975,29 @@ if __name__ == '__main__':
 
     # (year, race, driver, spline stiffness - None to work it out,
     #  does the car reach terminal speed?)
+    # A driver of None means whoever set the fastest lap of the race.
+    # Put a three-letter code such as 'HAM' there for that driver's
+    # quickest lap instead.
     # Monaco is left out: its map asked for 11g in the two Swimming Pool
     # chicanes. Kinks like that are now eased (see _eased), so it may be
     # worth trying again.
     setups = [
-        (2024, 'Monza', 'NOR', None, True),
-        # (2024, 'Monaco', 'LEC', None, False),
-        (2024, 'Silverstone', 'HAM', None, True),
-        (2024, 'Barcelona', 'VER', None, True),
+        (2024, 'Monza', None, None, True),
+        # (2024, 'Monaco', None, None, False),
+        (2024, 'Silverstone', None, None, True),
+        (2024, 'Barcelona', None, None, True),
     ]
 
     references = []
     for year, race, driver, lam, drag_limited in setups:
-        print(f"Loading {race} {year} ({driver})...")
+        who = driver or "the fastest lap of the race"
+        print(f"Loading {race} {year} ({who})...")
         reference = build_reference(year, race, driver, lam=lam,
                                     drag_limited=drag_limited)
         print(f"  {reference.track.length:.0f}m, "
               f"tightest radius {reference.track.radius.min():.0f}m")
-        print(f"  {reference.lap_choice}: {reference.official_time:.3f}s, "
+        print(f"  {reference.driver}, {reference.lap_choice}: "
+              f"{reference.official_time:.3f}s, "
               f"{reference.lap_time:.3f}s along this line")
         print(f"  {reference.track.source}")
         print(f"  {reference.clock}")
@@ -2072,7 +2098,8 @@ if __name__ == '__main__':
         axis.plot(reference.track.distance, result.speed_kph,
                   color=style.DRIVER_B, label='Simulated', linewidth=1.2)
         axis.set_ylabel('km/h')
-        axis.set_title(f"{reference.track.name}  "
+        whose = f" ({reference.driver})" if reference.driver else ""
+        axis.set_title(f"{reference.track.name}{whose}  "
                        f"{result.lap_time:.3f}s vs "
                        f"{reference.lap_time:.3f}s",
                        color=style.TEXT, fontsize=11)
