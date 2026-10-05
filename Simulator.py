@@ -18,6 +18,8 @@ Not modelled:
   - explicit weight transfer between individual wheels
   - aerodynamic balance shifting with ride height
   - a torque curve and gear ratios; power is a single figure
+  - DRS and energy deployment (the Car has a DRS figure that nothing
+    uses yet; build_reference() says when DRS was open on the real lap)
   - tyre temperature, wear, camber and track surface
   - elevation change, banking and kerbs
 
@@ -48,7 +50,7 @@ The map has faults. In places it steps sideways by 20 to 40cm over a few
 metres, and the odd sample lies metres off the path. Curvature is a
 second derivative, so a 30cm step looks like a 10g corner. Points more
 than 15cm from the fitted line are left out and the line is fitted
-again. At Spa in 2020 that took the worst point from 7.2g to 5.6g.
+again. At Spa in 2020 that took the worst point from 7.2g to 6.1g.
 
 The map bends more than the line a car really drives. That shows
 without any model, by working out how much grip the real lap uses at
@@ -107,16 +109,17 @@ than on the other 43 laps, and is now 7 to 9m earlier.
 
 FITTING
 
-Fitting a single circuit is underdetermined - many parameter sets produce
-the same lap time. fit_multi() fits several circuits at once, sharing tyre
-parameters while letting aero vary per circuit.
+One circuit on its own pins the car down poorly: many sets of numbers
+give nearly the same lap. fit_multi() fits several circuits at once,
+sharing what belongs to the car and its driver while letting aero vary
+per circuit.
 
-Even then tyre grip and downforce trade off against each other: more of
-one and less of the other gives nearly the same laps. So the error has a
-long shallow valley, and an optimiser that stops anywhere along it looks
-converged when it is not. fit_multi() solves the fit as a least-squares
-problem, which follows the valley to its lowest point, and checks itself
-from a second starting point.
+Even then some numbers trade off against each other: a straighter line
+with less downforce gives nearly the same laps as a tighter one with
+more. So the error has a long shallow valley, and an optimiser that
+stops anywhere along it looks converged when it is not. fit_multi()
+solves the fit as a least-squares problem, which follows the valley to
+its lowest point, and checks itself from a second starting point.
 
 The fit also carries line for each circuit, because the map bends more
 than the driven line (see GEOMETRY), and two shares of the tyre's grip:
