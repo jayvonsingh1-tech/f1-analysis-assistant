@@ -7,8 +7,8 @@ the three at each point is the speed the car can actually carry.
 
 Geometry and car are described separately from the physics, so the same
 simulator runs any car on any line. Track geometry currently comes from
-driven laps, so the simulator answers "how fast could this car go round the
-line drivers took" rather than "what is the optimal lap".
+FastF1's position data, which turns out to be a map of the circuit and
+not the line each car drove (see GEOMETRY).
 
 MODEL ASSUMPTIONS AND LIMITATIONS
 
@@ -26,47 +26,54 @@ laterally and longitudinally.
 
 GEOMETRY
 
-Geometry quality dominates everything else. FastF1 position data arrives
-about four times a second, which is too sparse within a single lap to
-compute curvature reliably. track_from_laps() pools many laps, which adds
-genuine spatial resolution, then fits a penalised smoothing spline: it
-penalises bending, so it curves only where the data demands. Fixed-knot
-splines were tried and rejected - they overfit the lap-to-lap differences
-in line and produced curvature noise everywhere.
+Geometry quality dominates everything else, and the first thing to know
+is what FastF1's position data is. X and Y are not where each car was on
+the road. Every car, on every lap, lies on one and the same path, to
+within the 10cm the numbers are rounded to. Checked on a real race: 19
+drivers, about 20,000 samples each, nine in ten within 16cm of one
+driver's line and none more than a metre from it. X and Y are the car's
+progress along a fixed map of the circuit.
 
-Two choices in that fit matter more than anything else in this file. The
-spline is fitted against lap time, not distance, so it smooths over more
-metres where the car is fast. And the smoothing strength is chosen by
-agreement between two halves of the laps, not by cross-validation on
-position, which leaves too much noise in the curvature. Curvature noise
-only ever slows the simulated car, so with noisy geometry the fit
-inflates grip to compensate. Tested on made-up laps with a known car:
-fitting on the old geometry got grip and downforce wrong by 10 to 30%,
-fitting on this one recovers them within about 7%.
+Three things follow.
 
-On real laps the gain was much smaller, and for a reason worth knowing.
-Those tests assumed random position noise. In real data the two halves
-of the laps already agree with very little smoothing, so the bumps left
-in the curvature are the same on every lap. They are errors in the
-position data that repeat at the same place, or real features of the
-line, and no smoothing chosen from the data can remove those. Monaco's
-two Swimming Pool chicanes are the worst case: quick left-right flicks
-at speed, where a metre of position error doubles the lateral g.
+There is no noise to average out. More laps put more points on the same
+path, which helps, but the data cannot say how much to smooth, because
+every lap repeats the same thing. Physics has to: a car cannot change
+direction arbitrarily fast, so track_from_laps() makes its spline just
+stiff enough to iron out anything that comes and goes more than about
+1.5 times a second. The spline is fitted against lap time, not distance,
+which is what lets one figure in seconds work at every speed.
+
+The map has faults. In places it steps sideways by 20 to 40cm over a few
+metres, and the odd sample lies metres off the path. Curvature is a
+second derivative, so a 30cm step looks like a 10g corner. Points more
+than 15cm from the fitted line are left out and the line is fitted
+again. At Spa in 2020 that took the worst point from 7.2g to 5.6g.
+
+The map bends more than the line a car really drives. Measured from the
+speed trace alone, with no model, a 2020 Mercedes at Monza never braked
+harder than about 5g, yet the map implies over 5g of cornering at the
+same speeds, and nearly 4g at 120 km/h where 2.5g is believable. A real
+driver uses the width of the road to straighten every corner. So the
+fit carries one more number for each circuit, line: the curvature the
+car really drives as a fraction of the map's (see FITTING).
 
 Always check implied lateral acceleration (v^2 * curvature) before
-fitting. Anything well above 6g is noise, and the fit will bend the car
-parameters to compensate for it.
+fitting. Well above 6g means the map is a poor guide to the driven line
+there: Monaco's Swimming Pool and the fast sweeps at Jeddah are
+examples.
 
 SPEED AND POSITION CLOCKS
 
 FastF1 gets speed and position as two separate streams, each with its
-own time stamps. If one clock runs a quarter of a second behind the
-other, the real speed trace sits 20m out of place at speed. Every
-braking point then looks early or late, and the fit bends the tyre grip
-and the drive fraction to explain it. Tested on made-up laps with a
-known car: a quarter of a second moved the fitted grip by 8 to 10% and
-the drive fraction by 0.13 to 0.3. build_reference() measures the offset
-on every lap, and corrects it when the laps agree.
+own time stamps, and they do not agree. Measured on five real sessions
+from 2020 to 2022, speed is stamped 0.06 to 0.14s later than position.
+At speed that puts the real speed trace 5 to 10m out of place, so every
+braking point looks late, and the fit bends the tyre grip and the drive
+fraction to explain it. Tested on made-up laps with a known car: a
+quarter of a second moved the fitted grip by 8 to 10% and the drive
+fraction by 0.13 to 0.3. build_reference() measures the offset on every
+lap and corrects it.
 
 FITTING
 
@@ -80,6 +87,23 @@ long shallow valley, and an optimiser that stops anywhere along it looks
 converged when it is not. fit_multi() solves the fit as a least-squares
 problem, which follows the valley to its lowest point, and checks itself
 from a second starting point.
+
+The fit also carries line for each circuit, because the map bends more
+than the driven line (see GEOMETRY). Braking and acceleration on the
+straights do not depend on the geometry, so they pin down the car's
+grip, and the corners then show how much straighter the real line was.
+Without it the fit has to invent grip to get round the map's corners,
+and then throttle back braking and traction to match the straights:
+tyre grip at its upper limit and drive_fraction at its lower one, which
+is what the first real fits showed. On real laps (Monza and Spa 2020,
+Bahrain 2022) line comes out at 0.5 to 0.6 and cuts the misfit by a
+third to a half.
+
+One thing the laps cannot settle. A car on a straighter line that
+brakes with all its grip laps exactly like a grippier car on the map
+that brakes with a fraction of it. So line and brake_fraction cannot
+both be fitted. The fit holds brake_fraction at 1 and fits line, and
+what a setup change is worth comes out the same either way.
 
 STEPPING
 
@@ -111,7 +135,7 @@ from dataclasses import dataclass, field, fields, replace
 import numpy as np
 from scipy.interpolate import make_smoothing_spline
 from scipy.optimize import least_squares
-from scipy.signal import savgol_filter
+from scipy.signal import medfilt, savgol_filter
 from scipy.spatial import cKDTree
 
 GRAVITY = 9.81
@@ -310,9 +334,6 @@ def _resample_line(x, y, spacing=1.0, smooth_metres=15.0):
     ry = savgol_filter(ry, window, polyorder=2, mode='interp')
     return s, rx, ry
 
-# Smoothing strengths tried when one is chosen automatically, weakest first
-_SMOOTHING_CANDIDATES = np.logspace(1.0, 7.0, 19)
-
 def _fit_line(clock, x, y, weights, lam):
     """Smoothing splines for x and y, both against the same clock."""
     return (make_smoothing_spline(clock, x, w=weights, lam=lam),
@@ -333,99 +354,57 @@ def _signed_curvature(spline_x, spline_y, clock):
                      out=np.zeros_like(numerator),
                      where=denominator > 1e-9)
 
-def _agreed_smoothing(halves, clock, speed):
-    """Choose the smoothing strength the data itself supports.
-
-    halves: binned samples from two separate sets of laps
-    clock, speed: points both halves cover, and the pace at each
-
-    The two halves drove the same corners but carry different noise. For
-    each candidate strength, smooth one half with it and compare its
-    lateral acceleration with the other half's, smoothed only lightly.
-    Too little smoothing and the first half's noise shows up as
-    disagreement. Too much and it flattens corners the other half still
-    has. The strength with the least disagreement is the best the data
-    can identify.
-
-    Each half holds half the samples, so smoothing the full set by the
-    same amount takes twice the strength.
-    """
-    lightly = []
-    for half in halves:
-        spline_x, spline_y = _fit_line(*half, lam=None)
-        lightly.append(
-            _signed_curvature(spline_x, spline_y, clock) * speed ** 2)
-
-    disagreement = []
-    for lam in _SMOOTHING_CANDIDATES:
-        total = 0.0
-        for half, other in zip(halves, reversed(lightly)):
-            spline_x, spline_y = _fit_line(*half, lam=lam)
-            lateral = (_signed_curvature(spline_x, spline_y, clock)
-                       * speed ** 2)
-            total += np.mean((lateral - other) ** 2)
-        disagreement.append(total)
-
-    return 2.0 * _SMOOTHING_CANDIDATES[int(np.argmin(disagreement))]
-
 def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
                     scale=0.1, max_offset=8.0, bin_width=0.5,
-                    speed_line=None):
-    """Build a Track by pooling position data from many laps.
+                    speed_line=None, cutoff=1.5, fault=0.15):
+    """Build a Track from the position data of many laps.
 
-    One lap's position data has about four samples a second - too few per
-    corner to compute a second derivative reliably. Pooling laps adds
-    genuine resolution: each lap is sampled at different points round the
-    track, so twenty laps give roughly twenty times the samples, and
-    random position noise averages out.
+    FastF1's positions all lie on one fixed map of the circuit (see
+    GEOMETRY in the notes at the top of this file). One lap gives a
+    point on that map only every 15m or so at speed. Each lap is sampled
+    at different places, so pooling laps fills the map in.
 
     Method:
       1. Use the first lap as a reference line, and give every sample
-         from every lap a continuous distance along it
+         from every lap a distance along it
       2. Read the fastest lap's clock at each point of that line
       3. Average the samples into short bins along the track, each bin
          weighted by how many samples it holds
-      4. Fit a penalised smoothing spline through the bin averages, x and
-         y each as a function of the clock
-      5. Differentiate the spline analytically for curvature
+      4. Fit a smoothing spline through the bin averages, x and y each
+         as a function of the clock, as stiff as `cutoff` calls for
+      5. Leave out the bins that lie sharply off the fitted line (map
+         faults), and fit again
+      6. Differentiate the spline for curvature
 
     Why the clock and not distance. Curvature is a second derivative, so
-    it amplifies noise, and how much that matters depends on speed:
-    lateral acceleration is speed squared times curvature, so a small
-    curvature error at 250 km/h is a large error in g. Smoothing against
-    distance treats every metre alike, which either leaves fast corners
-    noisy or rounds off hairpins. Smoothing against time reaches over
-    more metres where the car is fast and fewer where it is slow, which
-    is what both need. It needs speed_line; without one the fit falls
-    back to distance.
+    it magnifies every small error, and how much that matters depends on
+    speed: lateral acceleration is speed squared times curvature, so a
+    small curvature error at 250 km/h is a large error in g. Smoothing
+    against time reaches over more metres where the car is fast and
+    fewer where it is slow, which is what both need. It needs
+    speed_line; without one the fit falls back to distance and to
+    scipy's own choice of stiffness.
 
-    How strong the smoothing is. Left to cross-validation on position,
-    the spline is tuned to reproduce positions, and that leaves far too
-    much noise in the curvature. Noise only ever slows the simulated car
-    (it brakes for wiggles that are not there), so the fit then inflates
-    grip to compensate. _agreed_smoothing() chooses the strength from the
-    curvature itself, by building the line from two halves of the laps
-    and finding where they agree best.
-
-    Binning matters for two reasons. The smoothing spline puts a knot at
-    every data point, so samples from different laps landing millimetres
-    apart make it numerically singular. And a bin average of n samples
-    has 1/n the variance of one sample, so weighting by n is the correct
-    way to combine them.
+    How stiff. The data cannot say, because every lap traces the same
+    map. A car can: it cannot follow features of a path that come and go
+    more than once or twice a second. A smoothing spline of stiffness
+    lam, through points carrying `density` weight per unit of clock,
+    irons out anything shorter than about 2 pi (lam / density)^(1/4).
+    Turned round, that gives the stiffness for a chosen cut-off.
 
     positions: list of (x, y) raw position arrays, one per lap. The first
         is the alignment reference, so use the fastest lap.
-    lam: smoothing strength. None chooses it automatically. Raise it to
-        smooth harder.
+    lam: stiffness of the spline. None works it out from `cutoff`.
     max_offset: metres. Samples further than this from the reference line
-        are dropped, which removes off-track moments and data glitches.
+        are dropped, which removes off-track moments.
     bin_width: metres of track per averaging bin.
     speed_line: optional (x, y, speed_kph) from the fastest lap. Sets the
         clock, and is projected onto the fitted line so its speed is
         aligned with the geometry.
-
-    The result is an average line across laps, slightly smoother than any
-    single lap a driver actually drove.
+    cutoff: features of the path that come and go more often than this,
+        in times a second, are smoothed away.
+    fault: metres. Bins further than this from the fitted line are
+        treated as faults in the map and left out. None keeps them all.
     """
     # 1. Reference line from the first lap, plus its unit tangent
     ref_s, ref_x, ref_y = _resample_line(
@@ -439,10 +418,11 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     tangent_x, tangent_y = tangent_x / norm, tangent_y / norm
 
     # 2. The fastest lap's clock at each reference point. It is rescaled
-    # so a whole lap of clock equals the lap length, which keeps smoothing
-    # strengths comparable with and without a speed line.
+    # so a whole lap of clock equals the lap length: one unit of clock
+    # is then the time the car takes to cover a metre at its average
+    # speed.
+    mean_speed = None
     if speed_line is None:
-        pace = np.ones_like(ref_s)
         ref_clock = ref_s
     else:
         line_x = np.asarray(speed_line[0], dtype=float) * scale
@@ -462,7 +442,8 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
         ref_clock = np.concatenate(
             [[0.0], np.cumsum(0.5 * (slowness[1:] + slowness[:-1])
                               * np.diff(ref_s))])
-        ref_clock = ref_clock * (ref_s[-1] - ref_s[0]) / ref_clock[-1]
+        mean_speed = (ref_s[-1] - ref_s[0]) / ref_clock[-1]
+        ref_clock = ref_clock * mean_speed
 
     def clock_at(distance):
         """Clock reading at a distance along the reference line. Past
@@ -478,8 +459,8 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
             * (ref_clock[-1] - ref_clock[-2]) / (ref_s[-1] - ref_s[-2]))
         return reading
 
-    pooled_s, pooled_x, pooled_y, pooled_lap = [], [], [], []
-    for number, (lap_x, lap_y) in enumerate(positions):
+    pooled_s, pooled_x, pooled_y = [], [], []
+    for lap_x, lap_y in positions:
         lap_x = np.asarray(lap_x, dtype=float) * scale
         lap_y = np.asarray(lap_y, dtype=float) * scale
         offset, index = ref_tree.query(np.column_stack([lap_x, lap_y]))
@@ -496,45 +477,75 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
         pooled_s.append(ref_s[idx] + along)
         pooled_x.append(px)
         pooled_y.append(py)
-        pooled_lap.append(np.full(len(px), number))
 
     s = np.concatenate(pooled_s)
     x = np.concatenate(pooled_x)
     y = np.concatenate(pooled_y)
-    lap = np.concatenate(pooled_lap)
 
     # 3. Average into bins along the track, weighted by sample count.
-    # Bins are exactly bin_width apart in distance, which keeps the spline
-    # well conditioned.
+    # The smoothing spline puts a knot at every data point, so samples
+    # from different laps landing millimetres apart would make it
+    # numerically singular. Bins exactly bin_width apart avoid that.
     start = s.min()
     bins = np.floor((s - start) / bin_width).astype(int)
+    counts = np.bincount(bins)
+    occupied = counts > 0
+    centre = start + (np.flatnonzero(occupied) + 0.5) * bin_width
+    clock = clock_at(centre)
+    bin_x = np.bincount(bins, weights=x)[occupied] / counts[occupied]
+    bin_y = np.bincount(bins, weights=y)[occupied] / counts[occupied]
+    weight = counts[occupied].astype(float)
 
-    def binned(keep):
-        """Bin averages of the chosen samples: clock, x, y and weight."""
-        counts = np.bincount(bins[keep])
-        occupied = counts > 0
-        centre = start + (np.flatnonzero(occupied) + 0.5) * bin_width
-        return (clock_at(centre),
-                np.bincount(bins[keep], weights=x[keep])[occupied]
-                / counts[occupied],
-                np.bincount(bins[keep], weights=y[keep])[occupied]
-                / counts[occupied],
-                counts[occupied].astype(float))
+    # 4. How stiff to make the spline
+    if lam is not None:
+        stiffness = lam
+    elif mean_speed is None:
+        stiffness = None
+    else:
+        density = weight.sum() / (clock[-1] - clock[0])
+        reach = mean_speed / (2.0 * math.pi * cutoff)   # units of clock
+        stiffness = density * reach ** 4
 
-    # 4. Penalised smoothing spline through the bin averages
-    chosen = lam
-    if chosen is None and len(positions) >= 2:
-        # Compare the halves away from the very ends of the lap, where a
-        # half may have no samples yet
-        common = np.arange(start + 20.0, s.max() - 20.0, 1.0)
-        chosen = _agreed_smoothing(
-            [binned(lap % 2 == 0), binned(lap % 2 == 1)],
-            clock_at(common), np.interp(common, ref_s, pace))
+    # 5. Fit, leave out the bins that lie off the line, and fit again
+    # until no new ones turn up.
+    #
+    # A corner makes the fitted line sit a little inside the map over
+    # tens of metres. That is the smoothing at work, not a fault. A
+    # fault is sharp. So each bin's sideways distance from the line is
+    # judged against the typical distance over the 10m either side of
+    # it. Each stretch left out is widened by 2m either side, so the
+    # shoulders of a fault go with it.
+    keep = np.ones(len(clock), dtype=bool)
+    too_rough = False
+    if fault is not None:
+        nearby = 2 * int(round(10.0 / bin_width)) + 1
+        widen = np.ones(2 * int(round(2.0 / bin_width)) + 1)
+        for _ in range(6):
+            spline_x, spline_y = _fit_line(clock[keep], bin_x[keep],
+                                           bin_y[keep], weight[keep],
+                                           lam=stiffness)
+            along_x = spline_x.derivative(1)(clock)
+            along_y = spline_y.derivative(1)(clock)
+            sideways = (((bin_y - spline_y(clock)) * along_x
+                         - (bin_x - spline_x(clock)) * along_y)
+                        / np.maximum(np.hypot(along_x, along_y), 1e-9))
+            sharp = np.abs(sideways - medfilt(sideways, nearby)) > fault
+            off = np.convolve(sharp, widen, mode='same') > 0
+            if off.mean() > 0.1:
+                # A tenth of the lap is not a handful of faults. The
+                # data is too rough for this to mean anything.
+                keep[:] = True
+                too_rough = True
+                break
+            if np.array_equal(~off, keep):
+                break
+            keep = ~off
 
-    spline_x, spline_y = _fit_line(*binned(np.ones(len(s), dtype=bool)),
-                                   lam=chosen)
+    spline_x, spline_y = _fit_line(clock[keep], bin_x[keep], bin_y[keep],
+                                   weight[keep], lam=stiffness)
+    left_out = float((~keep).sum() * bin_width)
 
-    # 5. Analytic derivatives on a fine grid
+    # 6. Curvature from the spline's own derivatives, on a fine grid
     fine_s = np.arange(start + 0.5 * bin_width,
                        start + (bins.max() + 0.5) * bin_width, spacing / 4)
     fine = clock_at(fine_s)
@@ -556,22 +567,22 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
         channels['speed_kph'] = np.interp(distance, along[order],
                                           line_v[order])
 
-    against = "distance" if speed_line is None else "lap time"
     if lam is not None:
-        strength = f"lam {lam:g}"
-    elif chosen is None:
-        strength = "automatic"
+        smoothing = f"smoothed with lam {lam:g}"
+    elif stiffness is None:
+        smoothing = "smoothed against distance, automatic"
     else:
-        strength = f"automatic, lam {chosen:.3g}"
-        # Landing on either end of the candidates means the best
-        # strength may lie outside them
-        if chosen <= 2.0 * _SMOOTHING_CANDIDATES[0]:
-            strength += ", the weakest tried"
-        elif chosen >= 2.0 * _SMOOTHING_CANDIDATES[-1]:
-            strength += ", the strongest tried"
+        smoothing = (f"features quicker than {cutoff:g} a second "
+                     f"smoothed away")
+    if fault is None:
+        faults = "map faults kept"
+    elif too_rough:
+        faults = "too rough to pick out map faults"
+    else:
+        faults = f"{left_out:.0f}m of map faults left out"
     return Track(name=name, distance=distance, curvature=curvature,
-                 source=f"pooled from {len(positions)} laps, smoothed "
-                        f"against {against} ({strength})",
+                 source=f"pooled from {len(positions)} laps, {smoothing}, "
+                        f"{faults}",
                  channels=channels)
 
 # ---------------------------------------------------------------------------
@@ -838,60 +849,81 @@ SHARED_BOUNDS = {
     'brake_limit': (3.0, 9.0),
     'brake_fraction': (0.5, 1.2),
 }
-AERO_BOUNDS = {
+CIRCUIT_BOUNDS = {
     'cla': (2.5, 7.5),
     'cda': (0.8, 2.5),
+    'line': (0.3, 1.2),
 }
+
+def straightened(track, line):
+    """The same track with every bend scaled by `line`.
+
+    The map the positions come from bends more than the line a car
+    really drives (see GEOMETRY in the notes at the top of this file).
+    line is the driven line's curvature as a fraction of the map's: 1 is
+    the map itself, 0.6 a line that bends 0.6 times as much everywhere.
+
+    One number for a whole circuit is a simplification. A real line
+    straightens a short kink far more than a long hairpin.
+    """
+    return replace(track, curvature=track.curvature * line)
 
 def fit_multi(references, base_car,
               shared=('mu', 'drive_fraction'),
-              per_circuit=('cla', 'cda'),
+              per_circuit=('cla', 'cda', 'line'),
               verbose=True):
     """Fit one car across several circuits at once.
 
     Tyre and drivetrain parameters are shared, because they don't change
     between races. Aero is fitted per circuit, because teams genuinely run
-    different wing levels.
+    different wing levels. So is line, how much straighter the driven
+    line is than the map (see straightened()), because every circuit has
+    its own map.
 
     Solved as a least-squares problem on lap_residuals(), with a
     trust-region method. The choice matters. A general-purpose minimiser
     working on one error number stalled part-way, stopped at a different
     place for every starting point, and used thousands of laps doing it.
-    This one reaches the same answer from any start in a couple of
-    hundred laps. To prove it on the day, the fit is run from two very
-    different starting points and the two answers are compared.
+    This one reaches the same answer from any start in a few hundred
+    laps. To prove it on the day, the fit is run from two very different
+    starting points and the two answers are compared.
 
     Only fit what the laps can pin down. Tested on made-up laps with a
     known car: load_sensitivity trades off against downforce and comes
     out badly wrong, and brake_limit does nothing for a car like this
     (its tyres give up before its brakes do), so both are better held
-    at an assumed value than fitted. brake_fraction can be pinned down;
-    see braking_check().
+    at an assumed value than fitted. brake_fraction cannot be told apart
+    from line (see FITTING in the notes at the top), so fit one or the
+    other, never both.
 
-    Returns (shared_values, per_circuit_cars, outcome)
+    Returns (shared_values, per_circuit_cars, tracks, outcome). tracks
+    are the references' tracks as the fit says they were driven: the
+    same geometry with line applied. Simulate on those.
     """
     n = len(references)
-    fitted = tuple(shared) + tuple(per_circuit)
 
     lower = np.array([SHARED_BOUNDS[name][0] for name in shared]
-                     + [AERO_BOUNDS[name][0] for _ in range(n)
+                     + [CIRCUIT_BOUNDS[name][0] for _ in range(n)
                         for name in per_circuit])
     upper = np.array([SHARED_BOUNDS[name][1] for name in shared]
-                     + [AERO_BOUNDS[name][1] for _ in range(n)
+                     + [CIRCUIT_BOUNDS[name][1] for _ in range(n)
                         for name in per_circuit])
 
     def unpack(values):
         shared_values = {name: float(value) for name, value
                          in zip(shared, values[:len(shared)])}
-        cars = []
+        cars, tracks = [], []
         cursor = len(shared)
-        for _ in range(n):
-            aero = {name: float(value) for name, value
-                    in zip(per_circuit,
-                           values[cursor:cursor + len(per_circuit)])}
+        for reference in references:
+            own = {name: float(value) for name, value
+                   in zip(per_circuit,
+                          values[cursor:cursor + len(per_circuit)])}
             cursor += len(per_circuit)
-            cars.append(replace(base_car, **shared_values, **aero))
-        return shared_values, cars
+            # line belongs to the track, everything else to the car
+            line = own.pop('line', 1.0)
+            cars.append(replace(base_car, **shared_values, **own))
+            tracks.append(straightened(reference.track, line))
+        return shared_values, cars, tracks
 
     # A circuit only needs simulating again when one of its own numbers
     # changes. The solver nudges one number at a time, so remembering
@@ -899,12 +931,16 @@ def fit_multi(references, base_car,
     seen = {}
 
     def residuals(values):
-        _, cars = unpack(values)
+        _, cars, tracks = unpack(values)
         parts = []
-        for index, (reference, car) in enumerate(zip(references, cars)):
-            key = (index,) + tuple(getattr(car, name) for name in fitted)
+        cursor = len(shared)
+        for index, reference in enumerate(references):
+            key = ((index,) + tuple(values[:len(shared)])
+                   + tuple(values[cursor:cursor + len(per_circuit)]))
+            cursor += len(per_circuit)
             if key not in seen:
-                seen[key] = lap_residuals(reference.track, car, reference)
+                seen[key] = lap_residuals(tracks[index], cars[index],
+                                          reference)
             parts.append(seen[key])
         return np.concatenate(parts)
 
@@ -915,14 +951,15 @@ def fit_multi(references, base_car,
         return least_squares(residuals, start, bounds=(lower, upper),
                              x_scale='jac', diff_step=1e-3)
 
+    # Start from the base car, on the map as it is
+    own_start = [1.0 if name == 'line' else getattr(base_car, name)
+                 for name in per_circuit]
     outcome = solve(np.array(
-        [getattr(base_car, name) for name in shared]
-        + [getattr(base_car, name) for _ in range(n)
-           for name in per_circuit]))
+        [getattr(base_car, name) for name in shared] + own_start * n))
 
     # The same fit again from somewhere very different: plenty of tyre
-    # grip and little downforce. Agreement shows the answer comes from
-    # the data and not from where the search began.
+    # grip, little downforce and a much straighter line. Agreement shows
+    # the answer comes from the data and not from where the search began.
     span = upper - lower
     far = lower + 0.2 * span
     far[:len(shared)] = (lower + 0.8 * span)[:len(shared)]
@@ -932,11 +969,12 @@ def fit_multi(references, base_car,
     if second.cost < outcome.cost:
         outcome = second
 
-    shared_values, cars = unpack(outcome.x)
+    shared_values, cars, tracks = unpack(outcome.x)
 
     if verbose:
-        mean_error = np.mean([lap_error(reference.track, car, reference)[0]
-                              for reference, car in zip(references, cars)])
+        mean_error = np.mean([lap_error(track, car, reference)[0]
+                              for track, car, reference
+                              in zip(tracks, cars, references)])
         print(f"\nMulti-circuit fit ({len(seen)} laps simulated, "
               f"mean error {mean_error:.4f})")
         if gap < 0.01:
@@ -955,15 +993,18 @@ def fit_multi(references, base_car,
         for name, value in shared_values.items():
             print(f"    {name}: {getattr(base_car, name):.3f} "
                   f"-> {value:.3f}{at_bound(value, SHARED_BOUNDS[name])}")
-        print("\n  Per circuit (aero):")
-        for reference, car in zip(references, cars):
+        print("\n  Per circuit (aero, and line: how much of the map's "
+              "curvature the car really drives):")
+        cursor = len(shared)
+        for reference in references:
+            own = outcome.x[cursor:cursor + len(per_circuit)]
+            cursor += len(per_circuit)
             print(f"    {reference.track.name}: "
-                  + ", ".join(f"{name} {getattr(car, name):.3f}"
-                              + at_bound(getattr(car, name),
-                                         AERO_BOUNDS[name])
-                              for name in per_circuit))
+                  + ", ".join(f"{name} {value:.3f}"
+                              + at_bound(value, CIRCUIT_BOUNDS[name])
+                              for name, value in zip(per_circuit, own)))
 
-    return shared_values, cars, outcome
+    return shared_values, cars, tracks, outcome
 
 def _stream_offset(pos_time, x, y, car_time, speed_kph, scale=0.1,
                    reach=1.0, window=2.0, longest_gap=1.0):
@@ -1074,13 +1115,13 @@ def _stream_offset(pos_time, x, y, car_time, speed_kph, scale=0.1,
     return float(shifts[best] + 0.005 * (before - after) / bend)
 
 def build_reference(year, race, driver, spacing=1.0, lam=None,
-                    max_laps=20, drag_limited=True):
+                    max_laps=60, drag_limited=True):
     """Load a driver's laps and prepare a reference for fitting.
 
-    Geometry is pooled from up to max_laps clean laps on the same compound
-    as the fastest lap, so the lines are comparable. Speed comes from the
-    fastest lap alone, with its clock lined up with the position data's
-    first (see _stream_offset).
+    Geometry is pooled from up to max_laps clean laps. Every lap lies on
+    the same map path whatever the tyres or the fuel load, so any clean
+    lap will do. Speed comes from the fastest lap alone, with its clock
+    lined up with the position data's first (see _stream_offset).
     """
     import telemetry
 
@@ -1122,8 +1163,7 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
                      f"hole in its position data, so the line there is "
                      f"a guess")
 
-    same_compound = laps[laps['Compound'] == fastest['Compound']]
-    for _, lap in same_compound.iterlaps():
+    for _, lap in laps.iterlaps():
         if len(positions) >= max_laps:
             break
         if lap['LapNumber'] == fastest['LapNumber']:
@@ -1137,10 +1177,12 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
         positions.append((pos['X'].to_numpy(), pos['Y'].to_numpy()))
         offsets.append(clock_offset(lap, pos))
 
-    # Every lap gives its own measurement of the clock offset. Laps of
-    # one session should agree, so the correction is only made when
-    # they do, and it uses the middle value so one odd lap cannot move
-    # it. The spread is the range the middle half of the laps fall in.
+    # Every lap gives its own measurement of the clock offset, and on
+    # real data they scatter by about 0.03s either way. The middle value
+    # is used, so one odd lap cannot move it. How well that middle value
+    # is pinned down improves with the number of laps: roughly the
+    # width of the middle half of the laps over the square root of how
+    # many there are. The correction is made only when that is small.
     offsets = np.array([value for value in offsets if value is not None])
     stream_offset = None
     if len(offsets) < 3:
@@ -1148,8 +1190,8 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
                  "not corrected")
     else:
         quarter, three_quarters = np.percentile(offsets, [25, 75])
-        spread = three_quarters - quarter
-        if spread >= 0.05:
+        doubt = (three_quarters - quarter) / math.sqrt(len(offsets))
+        if doubt >= 0.02:
             own = ("not measured" if own_offset is None
                    else f"{own_offset:+.2f}s")
             clock = (f"speed and position clocks are {offsets.min():+.2f}s "
@@ -1162,8 +1204,9 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
             else:
                 side = "later" if stream_offset > 0 else "earlier"
                 clock = (f"speed is time-stamped {abs(stream_offset):.2f}s "
-                         f"{side} than position (laps agree within "
-                         f"{spread:.2f}s): corrected")
+                         f"{side} than position (measured on "
+                         f"{len(offsets)} laps, give or take "
+                         f"{doubt:.3f}s): corrected")
 
     speed_line = None
     if stream_offset is not None:
@@ -1213,41 +1256,6 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
 # ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------
-
-def braking_check(references, base_car, outcome,
-                  shared=('mu', 'drive_fraction')):
-    """Does the real car brake as hard as the model says it could?
-
-    The model lets all four tyres brake at their limit at once. A real
-    car cannot quite manage that: its brakes are split front to rear in
-    a fixed proportion, while the load on each axle keeps changing. If
-    the real car brakes well inside the model's limit and the fit is not
-    told, it lowers the tyre grip to explain it, and downforce then
-    comes out too high to make up for the grip.
-
-    This runs the fit again with brake_fraction free, and reports where
-    it settles and how much better the laps then match.
-
-    outcome: what fit_multi() returned for the same references with
-        brake_fraction held at 1
-
-    How to read the result. Tested on made-up laps with a known car:
-      - where the car braked at the full limit, brake_fraction still
-        came out at 0.83 to 0.94 and the squared differences fell by 13
-        to 27%, because it also soaks up geometry error at corner
-        entries
-      - where the car braked at 75 to 85% of the limit, it came out at
-        0.68 to 0.81 and they fell by 57 to 87%
-    The size of the fall separates the two cases more cleanly than the
-    value does.
-
-    Returns (shared_values, improvement). improvement is the fraction
-    by which the sum of squared differences fell.
-    """
-    shared_values, _, freed = fit_multi(
-        references, base_car, shared=tuple(shared) + ('brake_fraction',),
-        verbose=False)
-    return shared_values, 1.0 - freed.cost / outcome.cost
 
 def biggest_gaps(result, reference, count=3, window=150.0):
     """Where a simulated lap differs most from the real one.
@@ -1314,13 +1322,11 @@ if __name__ == '__main__':
     # Geometry check only. Set to False once every circuit passes.
     CHECK_ONLY = False
 
-    # After the fit, also test whether the real car brakes as hard as
-    # the model allows (see braking_check). Costs one more fit.
-    CHECK_BRAKING = True
-
-    # (year, race, driver, smoothing - None for automatic, terminal speed?)
+    # (year, race, driver, spline stiffness - None to work it out,
+    #  does the car reach terminal speed?)
     # Monaco is left out: it fails the geometry check at 11g, in the two
-    # Swimming Pool chicanes, and smoothing does not remove it.
+    # Swimming Pool chicanes, where the map is a poor guide to the line
+    # the cars really take.
     setups = [
         (2024, 'Monza', 'NOR', None, True),
         # (2024, 'Monaco', 'LEC', None, False),
@@ -1343,7 +1349,8 @@ if __name__ == '__main__':
             print(f"  WARNING: {note}")
         references.append(reference)
 
-    print("\nGeometry check (real F1 cars peak around 5-6g):")
+    print("\nGeometry check (the map at the real speed; real F1 cars "
+          "peak around 5-6g):")
     lateral = {}
     for reference in references:
         track = reference.track
@@ -1369,19 +1376,19 @@ if __name__ == '__main__':
                            color=style.TEXT, fontsize=11)
         axes[-1].set_xlabel('Distance (m)')
         style.title(fig, "Geometry check",
-                    "Dashed line is 6g. Narrow spikes are noise; "
-                    "sustained plateaus are real corners.")
+                    "Dashed line is 6g. Narrow spikes are faults in "
+                    "the map; sustained plateaus are real corners.")
         plt.tight_layout(rect=[0, 0, 1, 0.93])
         plt.show()
         raise SystemExit("\nGeometry check only. "
                          "Set CHECK_ONLY = False to run the fit.")
 
     print("\nFitting...")
-    shared_values, cars, outcome = fit_multi(
-        references, F1_2024, shared=('mu', 'drive_fraction'))
+    shared_values, cars, tracks, outcome = fit_multi(references, F1_2024)
 
-    results = [simulate(reference.track, car)
-               for reference, car in zip(references, cars)]
+    # tracks are the references' tracks as the fit says they were
+    # driven: the map's geometry with each circuit's line applied
+    results = [simulate(track, car) for track, car in zip(tracks, cars)]
 
     print("\nPer-circuit results (against the real lap along the same "
           "line):")
@@ -1406,18 +1413,6 @@ if __name__ == '__main__':
                   f"{row['time']:+.2f}s, corner needs "
                   f"{row['needs_g']:.1f}g, car has "
                   f"{row['has_g']:.1f}g{flag}")
-
-    if CHECK_BRAKING:
-        print("\nBraking check (the same fit with brake_fraction free):")
-        freed, improvement = braking_check(references, F1_2024, outcome)
-        print(f"  brake_fraction {freed['brake_fraction']:.3f}, "
-              f"mu {freed['mu']:.3f}, "
-              f"drive_fraction {freed['drive_fraction']:.3f}, "
-              f"squared differences down {improvement:.0%}")
-        print("  A car braking at the tyres' full limit reads 0.83 to "
-              "0.94 and 13 to 27% here.")
-        print("  One braking at 75 to 85% of it reads 0.68 to 0.81 and "
-              "57 to 87%.")
 
     fig, axes = plt.subplots(len(references), 1,
                              figsize=(13, 3 * len(references)))
