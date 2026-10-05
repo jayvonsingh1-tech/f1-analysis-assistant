@@ -250,12 +250,32 @@ class Track:
     channels holds any other data resampled onto the same distance grid,
     such as the real speed along a driven line. Computed geometry has
     none.
+
+    distance is in metres and has to be evenly spaced, because
+    simulate() steps along it one spacing at a time. curvature is 1 /
+    radius in 1/m. Left and right turns count the same, so its sign is
+    dropped.
     """
     name: str
     distance: np.ndarray
     curvature: np.ndarray
     source: str
     channels: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        # Plain arrays of numbers, whatever was handed over (a list, a
+        # pandas column), so that everything after this can count on it
+        self.distance = np.asarray(self.distance, dtype=float)
+        self.curvature = np.abs(np.asarray(self.curvature, dtype=float))
+
+        points = len(self.distance)
+        if points < 2 or points != len(self.curvature):
+            raise ValueError("A Track needs a distance and a curvature for "
+                             "each of its points, and at least two points.")
+        spacing = np.diff(self.distance)
+        if spacing[0] <= 0 or not np.allclose(spacing, spacing[0],
+                                              rtol=1e-6, atol=1e-9):
+            raise ValueError("Track.distance has to rise in even steps.")
 
     @property
     def radius(self):
@@ -292,6 +312,11 @@ def track_from_telemetry(x, y, time, name="unknown", spacing=1.0,
     Kept for quick single-lap use, but one lap's position data is too
     sparse for reliable curvature. Prefer track_from_laps() for anything
     that matters.
+
+    x, y: positions in FastF1's units of 1/10 m (see scale)
+    time: the time of each sample in seconds, as plain numbers. A
+        FastF1 time column has to be converted first, with
+        .dt.total_seconds().
     """
     x = np.asarray(x, dtype=float) * scale
     y = np.asarray(y, dtype=float) * scale
@@ -347,6 +372,8 @@ def _resample_line(x, y, spacing=1.0, smooth_metres=15.0):
     Used only to align laps against each other, so it needs to be in the
     right place, not to have accurate curvature.
     """
+    known = np.isfinite(x) & np.isfinite(y)
+    x, y = x[known], y[known]
     moved = np.hypot(np.diff(x), np.diff(y)) > 1e-6
     keep = np.concatenate([[True], moved])
     x, y = x[keep], y[keep]
@@ -419,8 +446,9 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     irons out anything shorter than about 2 pi (lam / density)^(1/4).
     Turned round, that gives the stiffness for a chosen cut-off.
 
-    positions: list of (x, y) raw position arrays, one per lap. The first
-        is the alignment reference, so use the fastest lap.
+    positions: list of (x, y) raw position arrays, one per lap. Every
+        other lap is lined up against the first, so put a lap with no
+        holes in its data there.
     lam: stiffness of the spline. None works it out from `cutoff`.
     max_offset: metres. Samples further than this from the reference line
         are dropped, which removes off-track moments.
@@ -494,6 +522,8 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     for lap_x, lap_y in positions:
         lap_x = np.asarray(lap_x, dtype=float) * scale
         lap_y = np.asarray(lap_y, dtype=float) * scale
+        known = np.isfinite(lap_x) & np.isfinite(lap_y)
+        lap_x, lap_y = lap_x[known], lap_y[known]
         offset, index = ref_tree.query(np.column_stack([lap_x, lap_y]))
 
         near = offset < max_offset
@@ -627,6 +657,15 @@ def _terminal_speed(car):
     """Top speed, where all the power goes into beating drag."""
     return (car.power / (0.5 * AIR_DENSITY * car.cda)) ** (1 / 3)
 
+def _time_along(step, speed):
+    """Seconds taken to cover a line, given the speed in m/s at each of
+    its evenly spaced points.
+
+    Time is distance over speed. Each point stands for one step of
+    track, half of it either side, covered at that point's speed.
+    """
+    return float(np.sum(step / np.maximum(speed, 1.0)))
+
 def cornering_limit(track, car, halvings=30):
     """Maximum speed at each point, set by lateral grip.
 
@@ -694,11 +733,14 @@ def simulate(track, car, initial_speed=None, periodic=False):
     its theoretical top speed instead of the speed it actually crossed
     the line at. The start speed comes from, in order:
       1. initial_speed, if given
-      2. the real speed at the line, if the track carries a measured
+      2. periodic=True: a flying lap that joins up with itself. The lap
+         is run twice. The second time the car starts at the speed it
+         finished the first, and has to cross the line slowly enough
+         for the corners that follow it. This is the one to use for
+         comparing setups, because the start speed then changes with
+         the car as it should. Twice the cost.
+      3. the real speed at the line, if the track carries a measured
          speed channel (geometry built from driven laps does)
-      3. periodic=True: run the lap twice, starting the second pass at
-         the first pass's finishing speed - correct for a flying lap
-         with no measured data, at twice the cost
       4. otherwise the cornering limit at the start
     """
     step = track.step
@@ -706,7 +748,9 @@ def simulate(track, car, initial_speed=None, periodic=False):
 
     corner_speed = cornering_limit(track, car)
 
-    if initial_speed is None and 'speed_kph' in track.channels:
+    if initial_speed is not None:
+        periodic = False
+    elif not periodic and 'speed_kph' in track.channels:
         initial_speed = float(track.channels['speed_kph'][0]) / 3.6
 
     # The sweeps below step through the lap one point at a time, so they
@@ -718,13 +762,15 @@ def simulate(track, car, initial_speed=None, periodic=False):
     halfway_curvature = (0.5 * (track.curvature[1:]
                                 + track.curvature[:-1])).tolist()
 
-    def one_pass(start):
+    def accelerate(start):
+        # Forwards from the first point, as hard as the car can go.
+        #
         # Each step uses the acceleration available half-way along it
         # (see STEPPING in the notes at the top of this file). The
         # speed there is not known yet, so it is predicted: v^2 changes
         # by 2 x acceleration x distance, and over half a step the car
         # is assumed to keep the acceleration it had on the last one.
-        # previous and ahead hold speed squared.
+        # previous holds speed squared.
         forward = [0.0] * points
         forward[0] = min(float(start), corner_cap[0])
         acceleration = 0.0
@@ -735,12 +781,24 @@ def simulate(track, car, initial_speed=None, periodic=False):
                 car, halfway, halfway_curvature[i - 1], braking=False)
             squared = previous + 2 * acceleration * step
             forward[i] = min(math.sqrt(max(squared, 1.0)), corner_cap[i])
+        return forward
 
-        # The same thing backwards from the end of the lap, under
-        # braking: how fast could the car have been going one step
-        # earlier and still be down to this speed here?
+    def brake(beyond=None):
+        # The same thing backwards from the last point, under braking:
+        # how fast could the car have been going one step earlier and
+        # still be down to this speed here?
+        #
+        # beyond is the most the car may be doing one step past the last
+        # point, where the next lap begins. None means the track simply
+        # ends there.
         backward = [0.0] * points
-        backward[-1] = corner_cap[-1]
+        if beyond is None:
+            backward[-1] = corner_cap[-1]
+        else:
+            slowing = available_longitudinal(car, beyond, join_curvature,
+                                             braking=True)
+            backward[-1] = min(math.sqrt(beyond ** 2 + 2 * slowing * step),
+                               corner_cap[-1])
         deceleration = 0.0
         for i in range(points - 2, -1, -1):
             ahead = backward[i + 1] ** 2
@@ -749,32 +807,45 @@ def simulate(track, car, initial_speed=None, periodic=False):
                 car, halfway, halfway_curvature[i], braking=True)
             squared = ahead + 2 * deceleration * step
             backward[i] = min(math.sqrt(max(squared, 1.0)), corner_cap[i])
-
-        return np.array(forward), np.array(backward)
+        return backward
 
     start = corner_speed[0] if initial_speed is None else initial_speed
-    forward, backward = one_pass(start)
+    forward = accelerate(start)
+    backward = brake()
 
-    if periodic and initial_speed is None:
-        lap_end = min(forward[-1], backward[-1])
-        forward, backward = one_pass(lap_end)
+    if periodic:
+        # The lap joins up with itself, one step after its last point.
+        # The braking sweep has just said how fast the car may be going
+        # at the first point and still make the corners after it. Brake
+        # again with the end of the lap knowing that, then start the lap
+        # one step on from the speed the car finishes at.
+        join_curvature = 0.5 * (track.curvature[-1] + track.curvature[0])
+        most = backward[0]
+        backward = brake(beyond=most)
+        finish = min(forward[-1], backward[-1])
+        gain = available_longitudinal(car, finish, join_curvature,
+                                      braking=False)
+        start = math.sqrt(max(finish ** 2 + 2 * gain * step, 1.0))
+        forward = accelerate(min(start, most))
+
+    forward, backward = np.array(forward), np.array(backward)
 
     speed = np.minimum(np.minimum(forward, backward), corner_speed)
 
-    # What sets the speed at each point: the corner itself, braking for
-    # a corner ahead, or how hard the car can accelerate. In a long
-    # corner the car sits a shade under the limit, holding its speed
-    # against drag, so 'corner' allows 1%. A point where the car could
-    # corner at top speed is not limited by the corner.
+    # What sets the speed at each point. The corner, if nine tenths or
+    # more of the grip is going sideways. (A car holding its speed
+    # through a long corner sits a little under the corner's own limit,
+    # because some grip has to go on beating drag.) Otherwise braking,
+    # if it is slowing for something ahead, or else how hard it can
+    # accelerate.
+    sideways = (car.mass * speed ** 2 * track.curvature
+                / np.maximum(car.grip_force(speed), 1e-9))
     limit = np.full(points, 'power', dtype=object)
     limit[backward < forward] = 'brake'
-    limit[np.isclose(speed, corner_speed, rtol=0.01)
-          & (corner_speed < 0.999 * _terminal_speed(car))] = 'corner'
-
-    lap_time = float(np.sum(step / np.maximum(speed, 1.0)))
+    limit[sideways >= 0.9] = 'corner'
 
     return LapResult(track=track, car=car, speed=speed,
-                     lap_time=lap_time, limit=limit)
+                     lap_time=_time_along(step, speed), limit=limit)
 
 # ---------------------------------------------------------------------------
 # Fitting
@@ -786,9 +857,9 @@ class Reference:
 
     lap_time is the time the real car took along the fitted line, worked
     out from its speed at each point. That is the fair target for a
-    simulation along the same line. The fitted line is a little shorter
-    than the distance the car really covered, so lap_time comes out
-    slightly under the timed lap, which is kept in official_time.
+    simulation along the same line. The fitted line stops some metres
+    short of the timing line at each end, so lap_time usually comes out
+    a few tenths under the timed lap, which is kept in official_time.
     """
     track: Track
     speed_kph: np.ndarray    # real speed at each of track.distance
@@ -877,7 +948,7 @@ def lap_residuals(track, car, reference, time_weight=1.0, top_weight=3.0):
     return np.concatenate([speed, [timing, top]])
 
 SHARED_BOUNDS = {
-    'mu': (1.0, 2.5),
+    'mu': (0.5, 2.5),
     'load_sensitivity': (0.0, 0.4),
     'drive_fraction': (0.3, 1.0),
     'brake_limit': (3.0, 9.0),
@@ -936,6 +1007,24 @@ def fit_multi(references, base_car,
     """
     n = len(references)
 
+    # Catch a mistyped name here, with a message that says what is
+    # allowed. ('mu') without a comma is the text 'mu', not a list.
+    if isinstance(shared, str) or isinstance(per_circuit, str):
+        raise ValueError("shared and per_circuit are lists of names. One "
+                         "name on its own needs a comma: ('mu',)")
+    unknown = ([name for name in shared if name not in SHARED_BOUNDS]
+               + [name for name in per_circuit
+                  if name not in CIRCUIT_BOUNDS])
+    if unknown:
+        raise ValueError(
+            f"Cannot fit {', '.join(unknown)}. shared can hold "
+            f"{', '.join(SHARED_BOUNDS)}; per_circuit can hold "
+            f"{', '.join(CIRCUIT_BOUNDS)}.")
+    if 'line' in per_circuit and 'brake_fraction' in shared:
+        raise ValueError("line and brake_fraction cannot both be fitted: "
+                         "the laps cannot tell them apart. See FITTING in "
+                         "the notes at the top of this file.")
+
     lower = np.array([SHARED_BOUNDS[name][0] for name in shared]
                      + [CIRCUIT_BOUNDS[name][0] for _ in range(n)
                         for name in per_circuit])
@@ -961,10 +1050,14 @@ def fit_multi(references, base_car,
 
     # A circuit only needs simulating again when one of its own numbers
     # changes. The solver nudges one number at a time, so remembering
-    # each circuit's laps saves most of the work.
+    # each circuit's laps saves most of the work. Only the latest ones
+    # are ever asked for again, so the store is emptied when it gets
+    # big.
     seen = {}
+    simulated = 0
 
     def residuals(values):
+        nonlocal simulated
         _, cars, tracks = unpack(values)
         parts = []
         cursor = len(shared)
@@ -973,17 +1066,22 @@ def fit_multi(references, base_car,
                    + tuple(values[cursor:cursor + len(per_circuit)]))
             cursor += len(per_circuit)
             if key not in seen:
+                if len(seen) > 2000:
+                    seen.clear()
                 seen[key] = lap_residuals(tracks[index], cars[index],
                                           reference)
+                simulated += 1
             parts.append(seen[key])
         return np.concatenate(parts)
 
     def solve(start):
-        # The solver needs to start strictly inside the bounds
+        # The solver needs to start strictly inside the bounds. A fit
+        # that has not settled within 200 steps is not going to: the
+        # ones that work take 10 to 30.
         margin = 1e-6 * (upper - lower)
         start = np.clip(start, lower + margin, upper - margin)
         return least_squares(residuals, start, bounds=(lower, upper),
-                             x_scale='jac', diff_step=1e-3)
+                             x_scale='jac', diff_step=1e-3, max_nfev=200)
 
     # Start from the base car, on the map as it is
     own_start = [1.0 if name == 'line' else getattr(base_car, name)
@@ -1000,6 +1098,8 @@ def fit_multi(references, base_car,
     second = solve(far)
 
     gap = float(np.max(np.abs(second.x - outcome.x) / span))
+    # status 0 is the solver saying it ran out of steps
+    ran_out = outcome.status == 0 or second.status == 0
     if second.cost < outcome.cost:
         outcome = second
 
@@ -1009,8 +1109,11 @@ def fit_multi(references, base_car,
         mean_error = np.mean([lap_error(track, car, reference)[0]
                               for track, car, reference
                               in zip(tracks, cars, references)])
-        print(f"\nMulti-circuit fit ({len(seen)} laps simulated, "
+        print(f"\nMulti-circuit fit ({simulated} laps simulated, "
               f"mean error {mean_error:.4f})")
+        if ran_out:
+            print("  WARNING: the fit ran out of steps before it settled. "
+                  "Treat the numbers below with care.")
         if gap < 0.01:
             print("  A second starting point gave the same answer.")
         else:
@@ -1019,9 +1122,11 @@ def fit_multi(references, base_car,
                   f"The better of the two is shown. Treat it with care.")
 
         def at_bound(value, bounds):
+            # Within a hundredth of the allowed range of either end
             low, high = bounds
             return ("  <- at bound"
-                    if min(value - low, high - value) < 1e-3 else "")
+                    if min(value - low, high - value) < 0.01 * (high - low)
+                    else "")
 
         print("\n  Shared (tyres and drivetrain):")
         for name, value in shared_values.items():
@@ -1193,6 +1298,11 @@ def _distance_along(track, x, y, scale=0.1):
     x = np.asarray(x, dtype=float) * scale
     y = np.asarray(y, dtype=float) * scale
 
+    # Samples with no position stay unknown (nan)
+    known = np.isfinite(x) & np.isfinite(y)
+    distance = np.full(len(x), np.nan)
+    x, y = x[known], y[known]
+
     _, index = cKDTree(np.column_stack([line_x, line_y])).query(
         np.column_stack([x, y]))
 
@@ -1200,7 +1310,8 @@ def _distance_along(track, x, y, scale=0.1):
     length = np.maximum(np.hypot(heading_x, heading_y), 1e-9)
     along = ((x - line_x[index]) * heading_x[index]
              + (y - line_y[index]) * heading_y[index]) / length[index]
-    return track.distance[index] + along
+    distance[known] = track.distance[index] + along
+    return distance
 
 def _speed_by_distance(track, pos_time, x, y, car_time, speed_kph, offset,
                        longest_gap=1.0):
@@ -1301,16 +1412,34 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
     session = telemetry.load_session(year, race)
     laps = session.laps.pick_drivers(driver).pick_quicklaps().pick_wo_box()
     fastest = laps.pick_fastest()
-    if fastest is None:
+
+    # With nothing to pick, FastF1 hands back None, or in older versions
+    # a lap with nothing in it. Either way there is no lap time.
+    try:
+        official_time = fastest['LapTime'].total_seconds()
+    except Exception:
+        official_time = float('nan')
+    if not math.isfinite(official_time):
         raise ValueError(f"{driver} has no clean laps at {race} {year}.")
 
     def seconds(column):
         return column.dt.total_seconds().to_numpy()
 
+    # Where a sample is missing, FastF1 fills in zeros and carries on:
+    # the car at X = Y = 0, or doing 0 km/h in the middle of a lap. The
+    # next two leave those made-up samples out.
+    def measured_positions(lap):
+        pos = lap.get_pos_data()
+        return pos[(pos['X'] != 0) | (pos['Y'] != 0)]
+
+    def measured_speed(lap, **padding):
+        car = lap.get_car_data(**padding)
+        return car[car['Speed'] > 0]
+
     def clock_offset(lap, pos):
         """The speed clock's offset measured on one lap, or None."""
         try:
-            car = lap.get_car_data()
+            car = measured_speed(lap)
             return _stream_offset(seconds(pos['SessionTime']), pos['X'],
                                   pos['Y'], seconds(car['SessionTime']),
                                   car['Speed'])
@@ -1321,20 +1450,15 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
         """Longest wait between two samples, in seconds."""
         return float(np.max(np.diff(times))) if len(times) > 1 else 0.0
 
-    # The fastest lap goes first, because it is the alignment reference
-    fastest_pos = fastest.get_pos_data()
+    fastest_pos = measured_positions(fastest)
+    if len(fastest_pos) < 50:
+        raise ValueError(f"{driver}'s fastest lap at {race} {year} has no "
+                         f"position data.")
+    pos_time = seconds(fastest_pos['SessionTime'])
     positions = [(fastest_pos['X'].to_numpy(), fastest_pos['Y'].to_numpy())]
+    holes = [longest_gap(pos_time) > 1.0]
     own_offset = clock_offset(fastest, fastest_pos)
     offsets = [own_offset]
-
-    # Samples normally arrive four or five times a second. A long hole
-    # in the fastest lap means part of it is guesswork.
-    notes = []
-    pos_time = seconds(fastest_pos['SessionTime'])
-    if longest_gap(pos_time) > 1.0:
-        notes.append(f"the fastest lap has a {longest_gap(pos_time):.1f}s "
-                     f"hole in its position data, so the line there is "
-                     f"a guess")
 
     for _, lap in laps.iterlaps():
         if len(positions) >= max_laps:
@@ -1342,13 +1466,25 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
         if lap['LapNumber'] == fastest['LapNumber']:
             continue
         try:
-            pos = lap.get_pos_data()
+            pos = measured_positions(lap)
         except Exception:
             continue
         if pos is None or len(pos) < 50:
             continue
         positions.append((pos['X'].to_numpy(), pos['Y'].to_numpy()))
+        holes.append(longest_gap(seconds(pos['SessionTime'])) > 1.0)
         offsets.append(clock_offset(lap, pos))
+
+    # track_from_laps() lines every lap up against the first one in the
+    # list, so the first should have no hole of over a second in it
+    # (samples normally arrive four or five times a second). That is the
+    # fastest lap unless it has a hole and another lap has none.
+    notes = []
+    if holes[0] and not all(holes):
+        positions.insert(0, positions.pop(holes.index(False)))
+    elif holes[0]:
+        notes.append("every lap has a hole of over a second in its "
+                     "position data, so the line may be wrong there")
 
     # Every lap gives its own measurement of the clock offset, and on
     # real data they scatter by about 0.03s either way. The middle value
@@ -1388,7 +1524,7 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
         # either side. The positions are a few metres out in places, but
         # this is good enough for track_from_laps() to set its clock by.
         try:
-            car = fastest.get_car_data(pad=5, pad_side='both')
+            car = measured_speed(fastest, pad=5, pad_side='both')
             car_stamps = seconds(car['SessionTime'])
             car_speed = car['Speed'].to_numpy()
             car_time = car_stamps - stream_offset
@@ -1404,6 +1540,15 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
                              f"{longest_gap(car_time[inside]):.1f}s hole "
                              f"in its speed data, so the real speed "
                              f"there is a guess")
+
+            # FastF1's DRS channel reads 10 or more while the flap is open
+            if 'DRS' in car:
+                opened = float(np.mean(car['DRS'].to_numpy()[inside] >= 10))
+                if opened > 0.01:
+                    notes.append(f"DRS was open for {opened:.0%} of the "
+                                 f"fastest lap. The model has no DRS, so "
+                                 f"the fitted drag is a blend of open "
+                                 f"and shut")
         except Exception:
             speed_line = stream_offset = car_stamps = None
             clock = ("the fastest lap's speed data could not be read on "
@@ -1435,13 +1580,20 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
             track.channels['speed_kph'] = placed
 
     speed_kph = track.channels['speed_kph']
-    along_line = float(np.sum(track.step / np.maximum(speed_kph / 3.6, 1.0)))
+    along_line = _time_along(track.step, speed_kph / 3.6)
+
+    # The line covers all but the last few metres of the lap, so the two
+    # times should agree to well within 1%
+    if not 0.99 < along_line / official_time < 1.01:
+        notes.append(f"at the real speed this line takes {along_line:.1f}s "
+                     f"but the lap was timed at {official_time:.1f}s, so "
+                     f"the line or the speed data is wrong somewhere")
 
     return Reference(track=track,
                      speed_kph=speed_kph,
                      lap_time=along_line,
                      drag_limited=drag_limited,
-                     official_time=fastest['LapTime'].total_seconds(),
+                     official_time=official_time,
                      stream_offset=stream_offset,
                      clock=clock,
                      notes=notes)
@@ -1544,20 +1696,22 @@ if __name__ == '__main__':
 
     print("\nGeometry check (the map at the real speed; real F1 cars "
           "peak around 5-6g):")
-    lateral = {}
+    lateral = []
     for reference in references:
         track = reference.track
         speed_ms = reference.speed_kph / 3.6
         g = speed_ms ** 2 * track.curvature / GRAVITY
-        lateral[track.name] = g
+        lateral.append(g)
         print(f"  {track.name}: peak {np.nanmax(g):.1f}g, "
               f"points above 6g: {int((g > 6).sum())}")
 
     if CHECK_ONLY:
-        fig, axes = plt.subplots(len(references), 1,
+        # squeeze=False gives a grid of plots even when there is only
+        # one, so the loop below works for any number of circuits
+        fig, axes = plt.subplots(len(references), 1, squeeze=False,
                                  figsize=(13, 2.6 * len(references)))
-        for axis, reference in zip(axes, references):
-            g = lateral[reference.track.name]
+        axes = axes[:, 0]
+        for axis, reference, g in zip(axes, references, lateral):
             axis.plot(reference.track.distance, g,
                       color=style.DRIVER_B, linewidth=1)
             axis.axhline(6, color=style.ACCENT, linewidth=0.8,
@@ -1607,8 +1761,9 @@ if __name__ == '__main__':
                   f"{row['needs_g']:.1f}g, car has "
                   f"{row['has_g']:.1f}g{flag}")
 
-    fig, axes = plt.subplots(len(references), 1,
+    fig, axes = plt.subplots(len(references), 1, squeeze=False,
                              figsize=(13, 3 * len(references)))
+    axes = axes[:, 0]
     for axis, reference, result in zip(axes, references, results):
         axis.plot(reference.track.distance, reference.speed_kph,
                   color=style.DRIVER_A, label='Actual', linewidth=1.2)
@@ -1623,6 +1778,6 @@ if __name__ == '__main__':
     axes[-1].set_xlabel('Distance (m)')
 
     style.title(fig, "Multi-circuit fit",
-                "Shared tyre parameters, per-circuit aero")
+                "Shared tyre parameters, per-circuit aero and line")
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.show()
