@@ -66,14 +66,40 @@ examples.
 SPEED AND POSITION CLOCKS
 
 FastF1 gets speed and position as two separate streams, each with its
-own time stamps, and they do not agree. Measured on five real sessions
-from 2020 to 2022, speed is stamped 0.06 to 0.14s later than position.
-At speed that puts the real speed trace 5 to 10m out of place, so every
+own time stamps, and they do not agree. Measured on four real races
+from 2020 to 2022, speed is stamped 0.04 to 0.09s later than position.
+At speed that puts the real speed trace 3 to 8m out of place, so every
 braking point looks late, and the fit bends the tyre grip and the drive
 fraction to explain it. Tested on made-up laps with a known car: a
 quarter of a second moved the fitted grip by 8 to 10% and the drive
 fraction by 0.13 to 0.3. build_reference() measures the offset on every
 lap and corrects it.
+
+WHERE THE CAR IS
+
+The positions are not measured afresh at every sample. Checked hop by
+hop on real laps: from one sample to the next the position moves on by
+what the car's own speed says, to within 10 or 20cm, until a timing
+loop, where it is put right in a single jump of anything from 2 to 10m.
+There are about a dozen such jumps a lap. Now and then a lap goes wrong
+for longer: on Hamilton's fastest lap at Monza in 2020 the positions
+sit 15m behind for half a kilometre, through both Lesmo corners. In
+2022 the time stamps are rough as well. Four hops in ten disagree with
+the speed by more than 2m, because a stamp is up to 0.15s out.
+
+Two things follow. The jumps upset the clock measurement, so it leaves
+them out (see _stream_offset). And the positions are a poor way to say
+where each speed sample belongs on the track. The car's own speed,
+added up, is a far better one: it has no jumps, and the positions are
+then needed only to pin down where the count starts (see
+_speed_by_distance).
+
+Tested on made-up laps built the same way, with the truth known. Placed
+by the positions, the real speed trace was out by 2.3 to 4.1 km/h on
+average and by 19 to 31 km/h at its worst point. Placed by the car's own
+distance it is out by 1.1 to 2.1 and 12 to 14. On the real Monza lap the
+slowest point of each Lesmo moved 13 to 14m: it had been 21m earlier
+than on the other 43 laps, and is now 7 to 9m earlier.
 
 FITTING
 
@@ -137,6 +163,7 @@ from scipy.interpolate import make_smoothing_spline
 from scipy.optimize import least_squares
 from scipy.signal import medfilt, savgol_filter
 from scipy.spatial import cKDTree
+from scipy.stats import theilslopes
 
 GRAVITY = 9.81
 AIR_DENSITY = 1.225      # kg/m3 at sea level, 15C
@@ -405,6 +432,10 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
         in times a second, are smoothed away.
     fault: metres. Bins further than this from the fitted line are
         treated as faults in the map and left out. None keeps them all.
+
+    The track's channels hold x and y, the fitted line itself in metres
+    at each point of track.distance, and speed_kph when speed_line is
+    given.
     """
     # 1. Reference line from the first lap, plus its unit tangent
     ref_s, ref_x, ref_y = _resample_line(
@@ -558,7 +589,10 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     distance = np.arange(0, arc[-1], spacing)
     curvature = np.interp(distance, arc, curvature_fine)
 
-    channels = {}
+    # The fitted line itself, in metres, so that anything else can be
+    # placed along it later
+    channels = {'x': np.interp(distance, arc, fx),
+                'y': np.interp(distance, arc, fy)}
     if speed_line is not None:
         fitted_tree = cKDTree(np.column_stack([fx, fy]))
         _, index = fitted_tree.query(np.column_stack([line_x, line_y]))
@@ -1007,7 +1041,7 @@ def fit_multi(references, base_car,
     return shared_values, cars, tracks, outcome
 
 def _stream_offset(pos_time, x, y, car_time, speed_kph, scale=0.1,
-                   reach=1.0, window=2.0, longest_gap=1.0):
+                   reach=1.0, window=2.0, longest_gap=1.0, jump=2.0):
     """How far the speed data's clock is from the position data's.
 
     FastF1 gets speed and position as two separate streams, each with
@@ -1028,9 +1062,20 @@ def _stream_offset(pos_time, x, y, car_time, speed_kph, scale=0.1,
     upsets a speed worked out across a quarter of a second, and hardly
     touches a distance covered in two.
 
+    The positions also jump (see WHERE THE CAR IS in the notes at the
+    top of this file): several times a lap, one sample lands 2 to 10m
+    from where the speed says the car should be. A stretch with a jump
+    in it looks like a clock error when it is not, and on real laps that
+    moved the answer by up to 0.03s. So the job is done twice. The first
+    answer is good enough to spot the jumps: any hop from one sample to
+    the next that differs from the speed's version by more than `jump`
+    metres. The second leaves those hops out of both sides.
+
     reach: seconds, the largest shift looked for either way
     longest_gap: seconds. Stretches with a longer hole in either stream
         are left out.
+    jump: metres. Hops further than this from what the speed says are
+        left out of the second pass.
     """
     pos_time = np.asarray(pos_time, dtype=float)
     x = np.asarray(x, dtype=float) * scale
@@ -1048,12 +1093,22 @@ def _stream_offset(pos_time, x, y, car_time, speed_kph, scale=0.1,
     if len(pos_time) < 50 or len(car_time) < 50:
         return None
 
-    # Distance covered since the first sample, according to each stream
-    path = np.concatenate(
-        [[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+    # The hop from each position sample to the next, and the distance
+    # the speed says the car has covered since its own first sample
+    hop = np.hypot(np.diff(x), np.diff(y))
     covered = np.concatenate(
         [[0.0], np.cumsum(0.5 * (speed[1:] + speed[:-1])
                           * np.diff(car_time))])
+
+    def by_speed(shift):
+        """Every hop again, this time from the speed trace slid in
+        time by `shift`."""
+        return np.diff(np.interp(pos_time + shift, car_time, covered))
+
+    def running(values):
+        """Running total, so the sum over any stretch is one
+        subtraction."""
+        return np.concatenate([[0.0], np.cumsum(values)])
 
     def holes_before(time):
         """How many long gaps a stream has before each of its samples."""
@@ -1083,36 +1138,152 @@ def _stream_offset(pos_time, x, y, car_time, speed_kph, scale=0.1,
     if len(first) < 50 or covered[-1] <= 0:
         return None
 
-    travelled = path[last] - path[first]
-
     shifts = np.arange(-reach, reach + 1e-9, 0.01)
-    miss = []
-    for shift in shifts:
-        predicted = (np.interp(pos_time[last] + shift, car_time, covered)
-                     - np.interp(pos_time[first] + shift, car_time,
-                                 covered))
-        # A speed sensor reading slightly high or low would look like a
-        # clock offset, so the speed trace is allowed one scale factor
-        factor = np.sum(predicted * travelled) / np.sum(predicted ** 2)
-        miss.append(np.mean((travelled - factor * predicted) ** 2))
 
-    best = int(np.argmin(miss))
-    if best in (0, len(shifts) - 1) or not np.isfinite(miss[best]):
+    def best_shift(sound):
+        """The shift at which the two streams agree best over every
+        stretch, counting only the hops marked sound."""
+        total = running(hop * sound)
+        travelled = total[last] - total[first]
+
+        miss = []
+        for shift in shifts:
+            total = running(by_speed(shift) * sound)
+            predicted = total[last] - total[first]
+            # A speed sensor reading slightly high or low would look
+            # like a clock offset, so the speed trace is allowed one
+            # scale factor
+            factor = (np.sum(predicted * travelled)
+                      / max(np.sum(predicted ** 2), 1e-9))
+            miss.append(np.mean((travelled - factor * predicted) ** 2))
+
+        best = int(np.argmin(miss))
+        if best in (0, len(shifts) - 1) or not np.isfinite(miss[best]):
+            return None
+
+        # Good data agrees to within a few percent of the distance
+        # covered. If even the best shift leaves the two far apart, they
+        # are not describing the same lap, and no shift means anything.
+        if math.sqrt(miss[best]) > 0.15 * np.mean(travelled):
+            return None
+
+        # A parabola through the lowest three points finds the minimum
+        # between the 0.01s steps
+        before, lowest, after = miss[best - 1:best + 2]
+        bend = before - 2.0 * lowest + after
+        if bend <= 0:
+            return float(shifts[best])
+        return float(shifts[best] + 0.005 * (before - after) / bend)
+
+    # First with every hop, then again without the ones that jump
+    rough = best_shift(np.ones(len(hop)))
+    if rough is None:
+        return None
+    sound = np.abs(hop - by_speed(rough)) <= jump
+    better = best_shift(sound)
+    return rough if better is None else better
+
+def _distance_along(track, x, y, scale=0.1):
+    """How far along a track's line each position sample lies, in metres.
+
+    Takes the nearest point of the line, then adds the part of the gap
+    to it that runs along the track.
+    """
+    line_x, line_y = track.channels['x'], track.channels['y']
+    x = np.asarray(x, dtype=float) * scale
+    y = np.asarray(y, dtype=float) * scale
+
+    _, index = cKDTree(np.column_stack([line_x, line_y])).query(
+        np.column_stack([x, y]))
+
+    heading_x, heading_y = np.gradient(line_x), np.gradient(line_y)
+    length = np.maximum(np.hypot(heading_x, heading_y), 1e-9)
+    along = ((x - line_x[index]) * heading_x[index]
+             + (y - line_y[index]) * heading_y[index]) / length[index]
+    return track.distance[index] + along
+
+def _speed_by_distance(track, pos_time, x, y, car_time, speed_kph, offset,
+                       longest_gap=1.0):
+    """One lap's real speed at each point of a track.
+
+    Every speed sample needs a place on the track. Reading it off the
+    positions is the obvious way, and the positions are not good enough
+    for it (see WHERE THE CAR IS in the notes at the top of this file):
+    they jump by metres at the timing loops, and now and then they sit
+    15m out for half a kilometre.
+
+    The car's own speed has no jumps. Adding up speed x time gives how
+    far the car had travelled at each speed sample, as smoothly as the
+    speed itself changes. That is a distance from an unknown starting
+    point, on a sensor that may read a shade high or low, so two numbers
+    are still needed: where on the track the count starts, and how many
+    metres of track one counted metre is worth. The positions give
+    those, all several hundred of them together, in a way that takes no
+    notice of the ones that are out:
+      - the rate is the middle value of the slope between every pair of
+        samples (a Theil-Sen fit)
+      - the start is the middle value of what is then left over
+
+    A hole in the speed data breaks the count, because nobody knows how
+    far the car went while nothing was recorded. So each stretch between
+    holes longer than `longest_gap` seconds gets a start of its own.
+
+    offset: seconds the speed is stamped later than position, from
+        _stream_offset(). The car's distance at the moment of a position
+        sample stamped t is its distance at speed-stamp t + offset.
+
+    Returns None if the two streams cannot be matched up.
+    """
+    car_time = np.asarray(car_time, dtype=float)
+    speed = np.asarray(speed_kph, dtype=float)
+    keep = np.isfinite(car_time) & np.isfinite(speed)
+    order = np.argsort(car_time[keep], kind='stable')
+    car_time, speed = car_time[keep][order], speed[keep][order]
+    if len(car_time) < 50:
         return None
 
-    # Good data agrees to within a few percent of the distance covered.
-    # If even the best shift leaves the two far apart, they are not
-    # describing the same lap, and no shift means anything.
-    if math.sqrt(miss[best]) > 0.15 * np.mean(travelled):
-        return None
+    # How far the car had gone at each speed sample, by its own speed
+    travelled = np.concatenate(
+        [[0.0], np.cumsum(0.5 * (speed[1:] + speed[:-1]) / 3.6
+                          * np.diff(car_time))])
 
-    # A parabola through the lowest three points finds the minimum
-    # between the 0.01s steps
-    before, lowest, after = miss[best - 1:best + 2]
-    bend = before - 2.0 * lowest + after
-    if bend <= 0:
-        return float(shifts[best])
-    return float(shifts[best] + 0.005 * (before - after) / bend)
+    # The same for the moment of each position sample, next to where
+    # that sample lies on the track
+    moment = np.asarray(pos_time, dtype=float) + offset
+    on_track = _distance_along(track, x, y)
+    usable = ((moment >= car_time[0]) & (moment <= car_time[-1])
+              & np.isfinite(on_track))
+    if usable.sum() < 50:
+        return None
+    moment, on_track = moment[usable], on_track[usable]
+    by_speed = np.interp(moment, car_time, travelled)
+
+    rate = theilslopes(on_track, by_speed)[0]
+    if not 0.95 < rate < 1.05:
+        # A speed sensor is never 5% out. The streams do not match.
+        return None
+    left_over = on_track - rate * by_speed
+
+    # Which stretch between holes each speed sample belongs to, and
+    # each position sample. A stretch with too few position samples to
+    # judge by keeps the start found from the whole lap.
+    stretch = np.concatenate(
+        [[0], np.cumsum(np.diff(car_time) > longest_gap)])
+    belongs = stretch[np.searchsorted(car_time, moment, side='right') - 1]
+    start = np.full(stretch[-1] + 1, float(np.median(left_over)))
+    for number in range(stretch[-1] + 1):
+        own = belongs == number
+        if own.sum() >= 10:
+            start[number] = np.median(left_over[own])
+
+    place = start[stretch] + rate * travelled
+
+    # Interpolating needs places that only ever go forwards
+    furthest = np.maximum.accumulate(place)
+    forward = np.concatenate([[True], place[1:] > furthest[:-1]])
+    if forward.sum() < 50:
+        return None
+    return np.interp(track.distance, place[forward], speed[forward])
 
 def build_reference(year, race, driver, spacing=1.0, lam=None,
                     max_laps=60, drag_limited=True):
@@ -1120,8 +1291,10 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
 
     Geometry is pooled from up to max_laps clean laps. Every lap lies on
     the same map path whatever the tyres or the fuel load, so any clean
-    lap will do. Speed comes from the fastest lap alone, with its clock
-    lined up with the position data's first (see _stream_offset).
+    lap will do. Speed comes from the fastest lap alone. Its clock is
+    lined up with the position data's first (see _stream_offset), and
+    each speed sample is then placed on the track by how far the car had
+    travelled (see _speed_by_distance).
     """
     import telemetry
 
@@ -1208,28 +1381,31 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
                          f"{len(offsets)} laps, give or take "
                          f"{doubt:.3f}s): corrected")
 
-    speed_line = None
+    speed_line = car_stamps = car_speed = None
     if stream_offset is not None:
-        # Keep every speed sample exactly as measured, and place each at
-        # the position the car had at that moment, read between the
-        # position samples either side
+        # A first placing of the speed samples: each at the position the
+        # car had at that moment, read between the position samples
+        # either side. The positions are a few metres out in places, but
+        # this is good enough for track_from_laps() to set its clock by.
         try:
             car = fastest.get_car_data(pad=5, pad_side='both')
-            car_time = seconds(car['SessionTime']) - stream_offset
+            car_stamps = seconds(car['SessionTime'])
+            car_speed = car['Speed'].to_numpy()
+            car_time = car_stamps - stream_offset
             inside = (car_time >= pos_time[0]) & (car_time <= pos_time[-1])
             if inside.sum() < 50:
                 raise ValueError("too little speed data")
             speed_line = (
                 np.interp(car_time[inside], pos_time, fastest_pos['X']),
                 np.interp(car_time[inside], pos_time, fastest_pos['Y']),
-                car['Speed'].to_numpy()[inside])
+                car_speed[inside])
             if longest_gap(car_time[inside]) > 1.0:
                 notes.append(f"the fastest lap has a "
                              f"{longest_gap(car_time[inside]):.1f}s hole "
                              f"in its speed data, so the real speed "
                              f"there is a guess")
         except Exception:
-            speed_line = stream_offset = None
+            speed_line = stream_offset = car_stamps = None
             clock = ("the fastest lap's speed data could not be read on "
                      "its own: clocks not corrected")
 
@@ -1240,6 +1416,23 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
 
     track = track_from_laps(positions, name=race, spacing=spacing, lam=lam,
                             speed_line=speed_line)
+
+    # Now the line exists, place each speed sample properly: by how far
+    # the car had travelled, and not by where the positions put it
+    if car_stamps is not None:
+        try:
+            placed = _speed_by_distance(track, pos_time, fastest_pos['X'],
+                                        fastest_pos['Y'], car_stamps,
+                                        car_speed, stream_offset)
+        except Exception:
+            placed = None
+        if placed is None:
+            notes.append("the fastest lap's speed could not be placed by "
+                         "the car's own distance, so its positions were "
+                         "used: the real speed may be a few metres out "
+                         "of place")
+        else:
+            track.channels['speed_kph'] = placed
 
     speed_kph = track.channels['speed_kph']
     along_line = float(np.sum(track.step / np.maximum(speed_kph / 3.6, 1.0)))
