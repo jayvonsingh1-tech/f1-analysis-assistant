@@ -229,6 +229,25 @@ of work. Against the same lap computed with 0.05m steps, 1m steps are
 now within 0.01 to 0.08s. What a setup change is worth was never much
 affected, because the bias was nearly the same for both cars compared.
 
+CHECKS
+
+simulator_checks.py holds checks that need no F1 data: corners and
+straights with exact answers, rules every lap has to obey, the fit
+finding a car it was not told about. Run it after every change to this
+file:  python simulator_checks.py
+
+OTHER CARS
+
+Nothing in simulate() is particular to F1. The checks run it at the size
+of a Formula Student car: a skidpad lap comes out within 0.003s of the
+exact answer. Two things to know at that size. Corners a few metres in
+radius need points closer together than the 1m used for F1 circuits: a
+hairpin of 4.5m radius is 0.06s out at 1m and right at 0.25m. And from
+a standing start the speeds are right but lap_time is not. It is the
+sum for a lap already at speed, and from rest the time has to be added
+up step by step, each step at the average of the speeds at its two ends
+(the checks do it that way, and get the exact 75m time).
+
 SPEED
 
 A fit runs thousands of laps, so simulate() has to be quick. Its two
