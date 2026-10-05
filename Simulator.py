@@ -1715,6 +1715,52 @@ def biggest_gaps(result, reference, count=3, window=150.0):
 
     return rows
 
+# One change to the car at a time: (what to call it, which number, how,
+# by how much). 'times' multiplies the number, 'plus' adds to it.
+SETUP_CHANGES = [
+    ('10% more downforce', 'cla', 'times', 1.10),
+    ('10% more drag', 'cda', 'times', 1.10),
+    ('10kg lighter', 'mass', 'plus', -10.0),
+    ('5% more power', 'power', 'times', 1.05),
+    ('5% more tyre grip', 'mu', 'times', 1.05),
+]
+
+def setup_effects(track, car, changes=SETUP_CHANGES):
+    """What each change to the car is worth on a track, in seconds a lap.
+
+    Makes one change at a time, runs the flying lap again and takes the
+    difference from the unchanged car. Negative is quicker. A flying lap
+    (periodic=True) is used so that the speed the car starts the lap at
+    changes with the car, as it would.
+
+    Each line is one number changed with everything else held, which is
+    not how a real car changes: a bigger wing brings drag with its
+    downforce. Changes this small add up closely enough, so the worth of
+    a wing is roughly the downforce line plus the drag line, each scaled
+    to what the wing really gives.
+
+    How far to trust them. Tested on 51 made-up sessions with a known
+    car, each fitted from data with the faults real data has: these
+    figures came out 4% from the truth on average. In the worst session
+    (a driven line straighter than the map by a different amount at
+    every corner) they averaged 14% out, with one figure 26% out. On
+    real fitted circuits there is one check from outside: teams reckon
+    10kg of fuel costs about 0.3s a lap, and this gives 0.23s at Monza,
+    0.22s at Bahrain and 0.31s at Spa.
+
+    Returns a dict of {what the change is called: seconds}.
+    """
+    base = simulate(track, car, periodic=True).lap_time
+
+    effects = {}
+    for label, name, how, amount in changes:
+        now = getattr(car, name)
+        changed = replace(car, **{name: now * amount if how == 'times'
+                                  else now + amount})
+        effects[label] = simulate(track, changed,
+                                  periodic=True).lap_time - base
+    return effects
+
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
@@ -1822,6 +1868,15 @@ if __name__ == '__main__':
                   f"{row['time']:+.2f}s, corner needs "
                   f"{row['needs_g']:.1f}g, car has "
                   f"{row['has_g']:.1f}g{flag}")
+
+    print("\nWhat a change to the car is worth (seconds a lap, flying "
+          "lap, one change at a time):")
+    for reference, track, car in zip(references, tracks, cars):
+        print(f"  {reference.track.name}:")
+        for label, seconds in setup_effects(track, car).items():
+            print(f"    {label:20s} {seconds:+.2f}s")
+    print("  Treat these as good to about 15%. See setup_effects() for "
+          "how that was tested.")
 
     fig, axes = plt.subplots(len(references), 1, squeeze=False,
                              figsize=(13, 3 * len(references)))
