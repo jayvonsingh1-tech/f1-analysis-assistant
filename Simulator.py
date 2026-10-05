@@ -50,13 +50,17 @@ second derivative, so a 30cm step looks like a 10g corner. Points more
 than 15cm from the fitted line are left out and the line is fitted
 again. At Spa in 2020 that took the worst point from 7.2g to 5.6g.
 
-The map bends more than the line a car really drives. Measured from the
-speed trace alone, with no model, a 2020 Mercedes at Monza never braked
-harder than about 5g, yet the map implies over 5g of cornering at the
-same speeds, and nearly 4g at 120 km/h where 2.5g is believable. A real
-driver uses the width of the road to straighten every corner. So the
-fit carries one more number for each circuit, line: the curvature the
-car really drives as a fraction of the map's (see FITTING).
+The map bends more than the line a car really drives. That shows
+without any model, by working out how much grip the real lap uses at
+each point: the force at the tyres over the load on them (weight plus an
+assumed downforce). At the hardest braking of the lap the cars use 1.5
+to 1.7, which is about what a racing slick is good for. Cornering round
+the map at the real speed would take about 2 at many corners and up to
+2.7. A tyre does not have half as much grip again sideways as it has
+lengthways, so the corners the cars drove were not as tight as the
+map's. A real driver uses the width of the road. So the fit carries one
+more number for each circuit, line: the curvature the car really drives
+as a fraction of the map's (see FITTING).
 
 Always check implied lateral acceleration (v^2 * curvature) before
 fitting. Well above 6g means the map is a poor guide to the driven line
@@ -115,21 +119,40 @@ problem, which follows the valley to its lowest point, and checks itself
 from a second starting point.
 
 The fit also carries line for each circuit, because the map bends more
-than the driven line (see GEOMETRY). Braking and acceleration on the
-straights do not depend on the geometry, so they pin down the car's
-grip, and the corners then show how much straighter the real line was.
-Without it the fit has to invent grip to get round the map's corners,
-and then throttle back braking and traction to match the straights:
-tyre grip at its upper limit and drive_fraction at its lower one, which
-is what the first real fits showed. On real laps (Monza and Spa 2020,
-Bahrain 2022) line comes out at 0.5 to 0.6 and cuts the misfit by a
-third to a half.
+than the driven line (see GEOMETRY), and two shares of the tyre's grip:
+brake_fraction, how much of it the car uses under braking, and
+drive_fraction, how much it can put down under power. Without them the
+fit has to invent grip to get round the map's corners, and then finds
+the car braking and accelerating as if it had far less. With them the
+fit's sum of squared differences on real laps (Monza and Spa 2020,
+Bahrain 2022) falls by 40 to 65%, and they come out at line 0.77 to
+0.83, brake_fraction 0.6 to 0.74 and drive_fraction 0.47 to 0.49.
 
-One thing the laps cannot settle. A car on a straighter line that
-brakes with all its grip laps exactly like a grippier car on the map
-that brakes with a fraction of it. So line and brake_fraction cannot
-both be fitted. The fit holds brake_fraction at 1 and fits line, and
-what a setup change is worth comes out the same either way.
+The tyre's own grip, mu, is not fitted, because it cannot be. A car
+with a grip of 1.75 on a line 0.8 times as curved as the map, braking
+with 0.6 of its grip and driving with 0.48, laps exactly like one with
+a grip of 1.4 on a line 0.64 times as curved, braking with 0.75 and
+driving with 0.6. The laps pin down three things: grip over line (the
+corners), grip times brake_fraction, and grip times drive_fraction.
+Four numbers cannot be had from three. So mu is held at a believable
+figure for the tyre, 1.75 at its reference load, which agrees with the
+hardest braking seen on the real laps. If the real tyre has 10% more
+grip than that, line comes out 10% too low and both shares 10% too
+high. The laps, and what a setup change is worth, come out exactly the
+same.
+
+A brake_fraction of 0.6 does not mean weak brakes. The model brakes at
+the limit all the way into every corner. A real driver is at the limit
+for a moment and well inside it for most of each braking zone, and the
+fitted share is the average.
+
+One line number for a whole circuit is a simplification: a real line
+straightens a chicane far more than a long corner. Building the line a
+car could really take, the smoothest one within a couple of metres of
+the map, fitted four real laps 8 to 50% better again. But the laps did
+not say how wide to make it (1.5m was best at Monza, 4m or more at
+Bahrain), and the downforce found swung with the width. It is not in
+this file.
 
 STEPPING
 
@@ -713,7 +736,8 @@ def available_longitudinal(car, speed, curvature, braking=False):
 
     if braking:
         # All four tyres brake, and drag helps. brake_fraction below 1
-        # allows for them not all reaching their limit together.
+        # allows for them not all reaching their limit together, and
+        # for a driver who is not on the limit all the way.
         tyre_limit = grip * remaining * car.brake_fraction
         mechanical_limit = car.brake_limit * car.mass * GRAVITY
         force = min(tyre_limit, mechanical_limit) + drag
@@ -950,14 +974,14 @@ def lap_residuals(track, car, reference, time_weight=1.0, top_weight=3.0):
 SHARED_BOUNDS = {
     'mu': (0.5, 2.5),
     'load_sensitivity': (0.0, 0.4),
-    'drive_fraction': (0.3, 1.0),
+    'drive_fraction': (0.2, 1.0),
     'brake_limit': (3.0, 9.0),
-    'brake_fraction': (0.5, 1.2),
+    'brake_fraction': (0.2, 1.5),
 }
 CIRCUIT_BOUNDS = {
     'cla': (2.5, 7.5),
     'cda': (0.8, 2.5),
-    'line': (0.3, 1.2),
+    'line': (0.3, 1.5),
 }
 
 def straightened(track, line):
@@ -966,7 +990,7 @@ def straightened(track, line):
     The map the positions come from bends more than the line a car
     really drives (see GEOMETRY in the notes at the top of this file).
     line is the driven line's curvature as a fraction of the map's: 1 is
-    the map itself, 0.6 a line that bends 0.6 times as much everywhere.
+    the map itself, 0.8 a line that bends 0.8 times as much everywhere.
 
     One number for a whole circuit is a simplification. A real line
     straightens a short kink far more than a long hairpin.
@@ -974,16 +998,28 @@ def straightened(track, line):
     return replace(track, curvature=track.curvature * line)
 
 def fit_multi(references, base_car,
-              shared=('mu', 'drive_fraction'),
+              shared=('brake_fraction', 'drive_fraction'),
               per_circuit=('cla', 'cda', 'line'),
               verbose=True):
     """Fit one car across several circuits at once.
 
-    Tyre and drivetrain parameters are shared, because they don't change
-    between races. Aero is fitted per circuit, because teams genuinely run
-    different wing levels. So is line, how much straighter the driven
-    line is than the map (see straightened()), because every circuit has
-    its own map.
+    What is fitted, and what is not:
+      - The tyre's grip (mu) is NOT fitted. It is taken from base_car,
+        like load_sensitivity, as something known about the tyre.
+      - brake_fraction and drive_fraction are shared by every circuit:
+        the share of that grip the car uses under braking and under
+        power. They belong to the car and its driver.
+      - cla and cda are fitted per circuit, because teams genuinely run
+        different wing levels.
+      - line is fitted per circuit: how much straighter the driven line
+        is than the map (see straightened()). Every circuit has its own
+        map.
+
+    Why the grip is held. Grip, line and the two shares cannot all four
+    be fitted: the laps pin down only three things about them (see
+    FITTING in the notes at the top of this file). Holding the grip at a
+    believable figure for the tyre leaves the other three meaning what
+    their names say.
 
     Solved as a least-squares problem on lap_residuals(), with a
     trust-region method. The choice matters. A general-purpose minimiser
@@ -997,9 +1033,7 @@ def fit_multi(references, base_car,
     known car: load_sensitivity trades off against downforce and comes
     out badly wrong, and brake_limit does nothing for a car like this
     (its tyres give up before its brakes do), so both are better held
-    at an assumed value than fitted. brake_fraction cannot be told apart
-    from line (see FITTING in the notes at the top), so fit one or the
-    other, never both.
+    at an assumed value than fitted.
 
     Returns (shared_values, per_circuit_cars, tracks, outcome). tracks
     are the references' tracks as the fit says they were driven: the
@@ -1020,9 +1054,11 @@ def fit_multi(references, base_car,
             f"Cannot fit {', '.join(unknown)}. shared can hold "
             f"{', '.join(SHARED_BOUNDS)}; per_circuit can hold "
             f"{', '.join(CIRCUIT_BOUNDS)}.")
-    if 'line' in per_circuit and 'brake_fraction' in shared:
-        raise ValueError("line and brake_fraction cannot both be fitted: "
-                         "the laps cannot tell them apart. See FITTING in "
+    if ('mu' in shared and 'brake_fraction' in shared
+            and 'drive_fraction' in shared and 'line' in per_circuit):
+        raise ValueError("mu, brake_fraction, drive_fraction and line "
+                         "cannot all four be fitted: the laps pin down "
+                         "only three things about them. See FITTING in "
                          "the notes at the top of this file.")
 
     lower = np.array([SHARED_BOUNDS[name][0] for name in shared]
@@ -1089,9 +1125,10 @@ def fit_multi(references, base_car,
     outcome = solve(np.array(
         [getattr(base_car, name) for name in shared] + own_start * n))
 
-    # The same fit again from somewhere very different: plenty of tyre
-    # grip, little downforce and a much straighter line. Agreement shows
-    # the answer comes from the data and not from where the search began.
+    # The same fit again from somewhere very different: the shared
+    # numbers near the top of their range, little downforce and a much
+    # straighter line. Agreement shows the answer comes from the data
+    # and not from where the search began.
     span = upper - lower
     far = lower + 0.2 * span
     far[:len(shared)] = (lower + 0.8 * span)[:len(shared)]
@@ -1128,7 +1165,10 @@ def fit_multi(references, base_car,
                     if min(value - low, high - value) < 0.01 * (high - low)
                     else "")
 
-        print("\n  Shared (tyres and drivetrain):")
+        if 'mu' not in shared:
+            print(f"\n  Tyre grip taken as {base_car.mu:.2f} (assumed, not "
+                  f"fitted).")
+        print("  Shared by every circuit:")
         for name, value in shared_values.items():
             print(f"    {name}: {getattr(base_car, name):.3f} "
                   f"-> {value:.3f}{at_bound(value, SHARED_BOUNDS[name])}")
@@ -1430,10 +1470,14 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
     # next two leave those made-up samples out.
     def measured_positions(lap):
         pos = lap.get_pos_data()
+        if 'X' not in pos:
+            return pos          # nothing at all was recorded
         return pos[(pos['X'] != 0) | (pos['Y'] != 0)]
 
     def measured_speed(lap, **padding):
         car = lap.get_car_data(**padding)
+        if 'Speed' not in car:
+            return car
         return car[car['Speed'] > 0]
 
     def clock_offset(lap, pos):
@@ -1480,6 +1524,7 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
     # (samples normally arrive four or five times a second). That is the
     # fastest lap unless it has a hole and another lap has none.
     notes = []
+    fastest_has_hole = holes[0]
     if holes[0] and not all(holes):
         positions.insert(0, positions.pop(holes.index(False)))
     elif holes[0]:
@@ -1517,46 +1562,59 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
                          f"{len(offsets)} laps, give or take "
                          f"{doubt:.3f}s): corrected")
 
-    speed_line = car_stamps = car_speed = None
-    if stream_offset is not None:
-        # A first placing of the speed samples: each at the position the
-        # car had at that moment, read between the position samples
-        # either side. The positions are a few metres out in places, but
-        # this is good enough for track_from_laps() to set its clock by.
-        try:
-            car = measured_speed(fastest, pad=5, pad_side='both')
-            car_stamps = seconds(car['SessionTime'])
-            car_speed = car['Speed'].to_numpy()
-            car_time = car_stamps - stream_offset
-            inside = (car_time >= pos_time[0]) & (car_time <= pos_time[-1])
-            if inside.sum() < 50:
-                raise ValueError("too little speed data")
-            speed_line = (
-                np.interp(car_time[inside], pos_time, fastest_pos['X']),
-                np.interp(car_time[inside], pos_time, fastest_pos['Y']),
-                car_speed[inside])
-            if longest_gap(car_time[inside]) > 1.0:
-                notes.append(f"the fastest lap has a "
-                             f"{longest_gap(car_time[inside]):.1f}s hole "
-                             f"in its speed data, so the real speed "
-                             f"there is a guess")
-
-            # FastF1's DRS channel reads 10 or more while the flap is open
-            if 'DRS' in car:
-                opened = float(np.mean(car['DRS'].to_numpy()[inside] >= 10))
-                if opened > 0.01:
-                    notes.append(f"DRS was open for {opened:.0%} of the "
-                                 f"fastest lap. The model has no DRS, so "
-                                 f"the fitted drag is a blend of open "
-                                 f"and shut")
-        except Exception:
-            speed_line = stream_offset = car_stamps = None
+    # A first placing of the speed samples: each at the position the car
+    # had at that moment, read between the position samples either side.
+    # The positions are a few metres out in places, but this is good
+    # enough for track_from_laps() to set its clock by. With no clock
+    # correction to make, the two streams are taken as they come.
+    shift = 0.0 if stream_offset is None else stream_offset
+    speed_line = car = car_stamps = car_speed = None
+    try:
+        car = measured_speed(fastest, pad=5, pad_side='both')
+        car_stamps = seconds(car['SessionTime'])
+        car_speed = car['Speed'].to_numpy()
+        car_time = car_stamps - shift
+        inside = (car_time >= pos_time[0]) & (car_time <= pos_time[-1])
+        if inside.sum() < 50:
+            raise ValueError("too little speed data")
+        speed_line = (
+            np.interp(car_time[inside], pos_time, fastest_pos['X']),
+            np.interp(car_time[inside], pos_time, fastest_pos['Y']),
+            car_speed[inside])
+        if longest_gap(car_time[inside]) > 1.0:
+            notes.append(f"the fastest lap has a "
+                         f"{longest_gap(car_time[inside]):.1f}s hole in "
+                         f"its speed data, so the real speed there is a "
+                         f"guess")
+    except Exception:
+        speed_line = car_stamps = None
+        if stream_offset is not None:
+            stream_offset = None
             clock = ("the fastest lap's speed data could not be read on "
                      "its own: clocks not corrected")
 
+    # FastF1's DRS channel reads 10 or more while the flap is open
+    try:
+        opened = float(np.mean(car['DRS'].to_numpy()[inside] >= 10))
+        if opened > 0.01:
+            notes.append(f"DRS was open for {opened:.0%} of the fastest "
+                         f"lap. The model has no DRS, so the fitted drag "
+                         f"is a blend of open and shut")
+    except Exception:
+        pass                    # no DRS channel to look at
+
     if speed_line is None:
-        # Fall back to FastF1's own merge of the two streams
+        # The last resort: FastF1's own merge of the two streams. It
+        # reads positions between samples, so a made-up sample at 0, 0
+        # drags its neighbours towards it. Keep only what lies within
+        # 20m of a position that was really measured.
         tel = fastest.get_telemetry()
+        real = cKDTree(np.column_stack([fastest_pos['X'], fastest_pos['Y']]))
+        spot = np.column_stack([tel['X'], tel['Y']]).astype(float)
+        known = np.isfinite(spot).all(axis=1)
+        away = np.full(len(tel), np.inf)
+        away[known] = real.query(spot[known])[0]
+        tel = tel[(away < 200) & (tel['Speed'] > 0).to_numpy()]
         speed_line = (tel['X'], tel['Y'], tel['Speed'])
 
     track = track_from_laps(positions, name=race, spacing=spacing, lam=lam,
@@ -1564,20 +1622,24 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
 
     # Now the line exists, place each speed sample properly: by how far
     # the car had travelled, and not by where the positions put it
+    placed = None
     if car_stamps is not None:
         try:
             placed = _speed_by_distance(track, pos_time, fastest_pos['X'],
                                         fastest_pos['Y'], car_stamps,
-                                        car_speed, stream_offset)
+                                        car_speed, shift)
         except Exception:
             placed = None
-        if placed is None:
-            notes.append("the fastest lap's speed could not be placed by "
-                         "the car's own distance, so its positions were "
-                         "used: the real speed may be a few metres out "
-                         "of place")
-        else:
-            track.channels['speed_kph'] = placed
+    if placed is not None:
+        track.channels['speed_kph'] = placed
+    else:
+        notes.append("the fastest lap's speed could not be placed by the "
+                     "car's own distance, so its positions were used: the "
+                     "real speed may be a few metres out of place")
+        if fastest_has_hole:
+            notes.append("the fastest lap has a hole of over a second in "
+                         "its position data, so the real speed there is "
+                         "a guess")
 
     speed_kph = track.channels['speed_kph']
     along_line = _time_along(track.step, speed_kph / 3.6)
@@ -1778,6 +1840,7 @@ if __name__ == '__main__':
     axes[-1].set_xlabel('Distance (m)')
 
     style.title(fig, "Multi-circuit fit",
-                "Shared tyre parameters, per-circuit aero and line")
+                "Tyre grip held. Braking and drive shares fitted for all "
+                "circuits, aero and line for each.")
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.show()
