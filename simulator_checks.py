@@ -3,14 +3,14 @@
 Each check compares the simulator with an answer known some other way:
 a formula from a physics textbook, a rule every lap has to obey, or the
 simulator itself run a different way. None of them needs any F1 data,
-so the whole file runs in a few seconds.
+so the whole file runs in well under a minute.
 
 Run it after every change to Simulator.py. A line that says BAD means
 the change broke something that used to work. The last line says ALL OK,
 or how many checks failed.
 
 The checks were themselves checked: the simulator was broken on purpose
-in 18 different places, one at a time, and every break made at least
+in 32 different places, one at a time, and every break made at least
 one line here say BAD.
 
 The last section runs the simulator at the size of a Formula Student
@@ -335,7 +335,9 @@ for label, names in (
         ("a name that is not a car number", dict(shared=('mu', 'wings'))),
         ("one name without its comma", dict(shared=('mu'))),
         ("grip, both shares and line all at once",
-         dict(shared=('mu', 'brake_fraction', 'drive_fraction')))):
+         dict(shared=('mu', 'brake_fraction', 'drive_fraction'))),
+        ("power both shared and per circuit",
+         dict(per_circuit=('cla', 'cda', 'line', 'power')))):
     message = refused(lambda: sim.fit_multi([lap_of_track], car,
                                             verbose=False, **names))
     check(f"a fit asked for {label}", message is not None,
@@ -379,35 +381,62 @@ check("nothing else is touched, and the map as it came is kept",
 print("8. The fit finds a car it was not told about")
 # ---------------------------------------------------------------------------
 
-# Two made-up circuits, each with its own wings, and a car that brakes
-# with 0.7 of its grip, drives with 0.5 and takes every corner 0.8 times
-# as tight as the map. The fit sees only the two speed traces.
-second = circuit(corners=[(300, 150, 60), (900, 60, 20), (1300, 250, 110),
-                          (2000, 120, 45), (2500, 60, 16), (2900, 300, 200),
-                          (3500, 150, 70)], length=3900.0)
-truth = [(track, dict(cla=4.0, cda=1.30)), (second, dict(cla=5.5, cda=1.60))]
-laps_seen = []
-for the_map, wings in truth:
-    true_car = sim.replace(car, brake_fraction=0.7, drive_fraction=0.5,
-                           **wings)
-    driven = sim.simulate(sim.straightened(the_map, 0.8), true_car,
-                          initial_speed=70.0)
-    laps_seen.append(sim.Reference(
-        track=sim.Track(name=the_map.name, distance=the_map.distance,
-                        curvature=the_map.curvature, source='made up',
-                        channels={'speed_kph': driven.speed * 3.6}),
-        speed_kph=driven.speed * 3.6, lap_time=driven.lap_time))
+# Two made-up circuits. At each one the car has its own wings, weighs
+# something different and runs in different air. It brakes with 0.7 of
+# its grip, drives with 0.5 and takes every corner 0.8 times as tight as
+# the map. The fit is told the weight and the air, as it is for a real
+# lap, and sees the two speed traces. The rest it has to find. (The
+# points are 2m apart here, which halves the time the fits take.)
+first = circuit(2.0)
+second = circuit(2.0, corners=[(300, 150, 60), (900, 60, 20),
+                               (1300, 250, 110), (2000, 120, 45),
+                               (2500, 60, 16), (2900, 300, 200),
+                               (3500, 150, 70)], length=3900.0)
+truth = [(first, dict(cla=4.0, cda=1.30), dict(mass=790.0, air_density=1.15)),
+         (second, dict(cla=5.5, cda=1.60), dict(mass=800.0, air_density=1.19))]
 
-shared, cars, tracks, outcome = sim.fit_multi(laps_seen, car, verbose=False)
+def laps_seen(powers):
+    """One lap of each circuit by the true car, with this power at
+    each, as references for the fit."""
+    seen = []
+    for (the_map, wings, day), power in zip(truth, powers):
+        true_car = sim.replace(car, brake_fraction=0.7, drive_fraction=0.5,
+                               power=power, **wings, **day)
+        driven = sim.simulate(sim.straightened(the_map, 0.8), true_car,
+                              initial_speed=70.0)
+        seen.append(sim.Reference(
+            track=sim.Track(name=the_map.name, distance=the_map.distance,
+                            curvature=the_map.curvature, source='made up',
+                            channels={'speed_kph': driven.speed * 3.6}),
+            speed_kph=driven.speed * 3.6, lap_time=driven.lap_time, **day))
+    return seen
+
+# The same 640kW at both circuits, as laps from one season have
+shared, cars, tracks, outcome = sim.fit_multi(laps_seen([640e3, 640e3]), car,
+                                              verbose=False)
 close("braking share", shared['brake_fraction'], 0.7, 0.02)
 close("drive share", shared['drive_fraction'], 0.5, 0.02)
-for found, fitted_track, (the_map, wings) in zip(cars, tracks, truth):
+close("power (kW)", shared['power'] / 1000, 640.0, 10.0)
+for found, fitted_track, (the_map, wings, day) in zip(cars, tracks, truth):
     line = fitted_track.curvature.max() / the_map.curvature.max()
+    check(f"it runs the {day['mass']:.0f}kg car in the air it was told",
+          found.mass == day['mass']
+          and found.air_density == day['air_density'])
     close(f"downforce at the circuit with {wings['cla']}", found.cla,
           wings['cla'], 0.1)
     close(f"drag at the circuit with {wings['cda']}", found.cda,
           wings['cda'], 0.03)
     close("line there", line, 0.8, 0.02)
+
+# A different power at each circuit, as laps from different seasons
+# have, with the fit asked for a power for each
+shared, cars, tracks, outcome = sim.fit_multi(
+    laps_seen([640e3, 700e3]), car,
+    shared=('brake_fraction', 'drive_fraction'),
+    per_circuit=('cla', 'cda', 'line', 'power'), verbose=False)
+for found, power in zip(cars, (640.0, 700.0)):
+    close(f"a power for each circuit: the one with {power:.0f}kW",
+          found.power / 1000, power, 10.0)
 
 # ---------------------------------------------------------------------------
 print("9. The table of what a change is worth")
@@ -426,7 +455,89 @@ close("10kg lighter is the flying lap with it minus the one without (s)",
       worth['10kg lighter'], by_hand, 1e-12)
 
 # ---------------------------------------------------------------------------
-print("10. At the size of a Formula Student car")
+print("10. Weight, air and power")
+# ---------------------------------------------------------------------------
+
+# The standard day at sea level, 15C and 1013.25 millibar, is 1.225 kg/m3
+close("air at 15C and 1013.25mbar (kg/m3)", sim.density_of_air(15.0, 1013.25),
+      1.225, 0.0005)
+
+# Damp air, against the weather forecasters' formula: (pressure - 0.378 x
+# vapour pressure) / (287.05 x kelvin). Steam tables give water's vapour
+# pressure at 30C as 4246 pascals, and the air here holds 80% of that.
+exact = (100_000.0 - 0.378 * 0.8 * 4246.0) / (287.05 * 303.15)
+close("air at 30C, 1000mbar and 80% humidity (kg/m3)",
+      sim.density_of_air(30.0, 1000.0, 80.0), exact, 0.0005)
+
+# Downforce and drag are in proportion to the air's density
+thin = sim.replace(car, air_density=AIR_DENSITY / 2)
+close("half the air gives half the downforce",
+      thin.downforce(80.0) / car.downforce(80.0), 0.5, 1e-12)
+close("and half the drag", thin.drag(80.0) / car.drag(80.0), 0.5, 1e-12)
+close("so the top speed is higher by the cube root of 2",
+      sim._terminal_speed(thin) / sim._terminal_speed(car), 2 ** (1 / 3),
+      1e-12)
+half_wings = sim.replace(car, cla=car.cla / 2, cda=car.cda / 2)
+close("a lap in half the air is a lap with half the wings (s)",
+      sim.simulate(track, thin, periodic=True).lap_time,
+      sim.simulate(track, half_wings, periodic=True).lap_time, 1e-9)
+
+# Reading the air off a lap's weather. This stands in for a FastF1 lap.
+class LapWith:
+    def __init__(self, **weather):
+        self.weather = weather
+
+    def get_weather_data(self):
+        return self.weather
+
+density, said = sim._air_for(LapWith(AirTemp=25.0, Pressure=780.0,
+                                     Humidity=30.0))
+check("the thin air of Mexico City is accepted",
+      density is not None and 0.88 < density < 0.93, said)
+density, said = sim._air_for(LapWith(AirTemp=25.0, Pressure=78.0,
+                                     Humidity=30.0))
+check("a pressure ten times too low is not", density is None, said)
+density, said = sim._air_for(LapWith())
+check("a lap with no weather gives no density", density is None, said)
+density, said = sim._air_for(LapWith(AirTemp=20.0, Pressure=1000.0,
+                                     Humidity=float('nan')))
+check("a missing humidity is done without",
+      density is not None
+      and abs(density - sim.density_of_air(20.0, 1000.0)) < 1e-12, said)
+
+# Weight: the least the rules allow plus the fuel still on board
+close("2024, first lap of 50: 798kg and all 100kg of fuel",
+      sim.race_weight(2024, 1, 50), 898.0, 1e-9)
+close("2024, last lap of 50: 2kg of fuel left",
+      sim.race_weight(2024, 50, 50), 800.0, 1e-9)
+close("2020, lap 34 of 53: 746kg and 20/53 of the fuel",
+      sim.race_weight(2020, 34, 53), 746.0 + 100.0 * 20 / 53, 1e-9)
+close("2026, first lap of 50: 768kg and the 70kg those cars start with",
+      sim.race_weight(2026, 1, 50), 838.0, 1e-9)
+check("a season with no weight on record gives none",
+      sim.race_weight(1990, 10, 50) is None)
+
+# Why the weight has to be told and cannot be fitted: a car 10% bigger
+# in every way laps exactly the same. Every force on it is 10% bigger,
+# and so is the mass those forces have to move.
+bigger = sim.replace(car, mass=car.mass * 1.1, power=car.power * 1.1,
+                     cla=car.cla * 1.1, cda=car.cda * 1.1,
+                     max_tractive_force=car.max_tractive_force * 1.1,
+                     reference_load=car.reference_load * 1.1)
+close("a car 10% bigger in every way laps the same (s)",
+      sim.simulate(track, bigger, periodic=True).lap_time,
+      sim.simulate(track, car, periodic=True).lap_time, 1e-9)
+worth_bigger = sim.setup_effects(track, bigger)
+check("and its table is the same, but for 10kg being a smaller share of it",
+      all(abs(worth_bigger[label] - worth[label]) < 1e-9
+          for label in worth if label != '10kg lighter')
+      and abs(worth_bigger['10kg lighter'] / worth['10kg lighter']
+              - 1 / 1.1) < 0.01,
+      f"10kg lighter: {worth_bigger['10kg lighter']:+.3f}s, was "
+      f"{worth['10kg lighter']:+.3f}s")
+
+# ---------------------------------------------------------------------------
+print("11. At the size of a Formula Student car")
 # ---------------------------------------------------------------------------
 
 # Something like a Formula Student car: 280kg with its driver, 60kW at

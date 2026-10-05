@@ -24,12 +24,8 @@ Not modelled:
     there is one, and warns where there is not)
   - tyre temperature, wear, camber and track surface
   - elevation change, banking and kerbs
-  - the car's weight and the air on the day: every lap is run at 850kg
-    in sea-level air. A real car weighs its minimum plus the fuel left,
-    and on four real race days the air was 3.5 to 7% thinner. Tested on
-    made-up laps with a car 60kg lighter and 60kW weaker than assumed:
-    what a setup change is worth hardly moved, but the fitted downforce
-    came out 8 to 19% too high and the fitted drag 8 to 9% too high
+  - the tyres' rolling resistance, and the wind (FastF1 records the
+    wind with the rest of the weather, and nothing here uses it yet)
 
 Grip sharing uses a friction ellipse, which assumes equal peak grip
 laterally and longitudinally.
@@ -75,15 +71,15 @@ them (weight plus an assumed downforce). At the hardest braking of the
 lap the cars use 1.5 to 1.7. Cornering round the map at the real speed
 takes about 2 at many corners and up to 2.7. So the fit carries one
 more number for each circuit, line, which scales the map's curvature
-(see FITTING). It comes out near 0.8.
+(see FITTING). It comes out at 0.8 to 0.9.
 
 What line stands for is not settled, and the laps cannot settle it (see
 FITTING): a car with more cornering grip than the tyre figure used here
 laps exactly like a car taking wider arcs than the map. A racing line
 worked out inside the edges of the road does not account for it. With
 the real laps placed on the database's own racing line the fit still
-wanted 0.80 at Monza and 0.84 at Spa, against 0.78 and 0.82 on the map,
-and fitted no better. (On the middle of the road it wanted 0.45 to
+wanted 0.82 at Monza and 0.86 at Spa, against 0.80 and 0.84 on the map,
+and fitted no better. (On the middle of the road it wanted 0.44 to
 0.50.) So the map is about as good as a line inside the edges gets.
 
 What evidence there is points to real cars taking wider arcs than that,
@@ -105,8 +101,8 @@ get the car through it. Jeddah in 2021 has six such kinks, of 7 to
 asks for more than MOST_LATERAL_G at the real speed, the bend is eased
 to the tightest one that speed allows (see _eased), and the loading
 report says where. At Jeddah that is 159m in all. Fitted together with
-Bahrain, the fit's squared error falls by 37%, and Jeddah's lap comes
-out 0.36s from the real one where it was 0.85s. At Monza and Bahrain
+Bahrain, the fit's squared error falls by 38%, and Jeddah's lap comes
+out 0.47s from the real one where it was 0.89s. At Monza and Bahrain
 nothing is eased, and at Spa 9m.
 
 Longer stretches are left alone and reported. A long stretch over the
@@ -156,8 +152,8 @@ FITTING
 
 One circuit on its own pins the car down poorly: many sets of numbers
 give nearly the same lap. fit_multi() fits several circuits at once,
-sharing what belongs to the car and its driver while letting aero vary
-per circuit.
+sharing what belongs to the car and its driver (its power, and how
+much of its grip it uses) while letting aero vary per circuit.
 
 Even then some numbers trade off against each other: a lower line with
 less downforce gives nearly the same laps as a higher one with more. So
@@ -173,9 +169,10 @@ drive_fraction, how much it can put down under power. Without them one
 grip figure has to serve the corners, the braking and the drive out of
 the corners, and the real laps want far more for the first than for the
 other two. With them the fit's sum of squared differences on real laps
-(Monza and Spa 2020, Bahrain 2022) falls by 40 to 65%, and they come
-out at line 0.77 to 0.83, brake_fraction 0.6 to 0.74 and drive_fraction
-0.47 to 0.49.
+(Monza and Spa 2020, Bahrain 2022, and Bahrain with Jeddah 2021) falls
+by 38 to 57%, and they come out at line 0.80 to 0.91, brake_fraction
+0.60 to 0.75 and drive_fraction 0.45 to 0.48. (Jeddah's own line is
+0.57. Its map is the worst of the four: see GEOMETRY.)
 
 The tyre's own grip, mu, is not fitted, because it cannot be. A car
 with a grip of 1.75 and a line of 0.8, braking with 0.6 of its grip and
@@ -193,19 +190,21 @@ A brake_fraction of 0.6 does not mean weak brakes. The model brakes at
 one steady share of the grip all the way into every corner. A real
 driver brakes late and hard, then eases off, and the fitted share is
 the average. So the simulated car starts braking too early: on three
-real races it was on the brakes for 4 to 5% of the lap where the real
-car was not yet slowing hard.
+real races it was on the brakes for 3.5 to 5% of the lap where the
+real car was not yet slowing hard.
 
 Where the fit is still out. On three real races (Monza and Spa 2020,
-Bahrain 2022) the simulated speed is about 10 km/h from the real one,
-rms. Split by what limits the simulated car at each point: the 83% of
-the lap where it is the engine holds 64% of the squared error, the 13%
-under braking holds 25%, and the 4% at the cornering limit holds 11%.
-About half of it all lies in the last 200m before the braking points,
-where the simulated car is 4 to 8 km/h too fast. It gains about half a
-second a lap on the straights and loses it again elsewhere. At the
-cornering limit it is 3 to 9 km/h too slow on average and 16 to 18 km/h
-out rms: too slow at some corners, too fast at others.
+Bahrain 2022, fitted with a power for each because the seasons differ)
+the simulated speed is 7 to 10 km/h from the real one, rms. Split by
+what limits the simulated car at each point: the 83% of the lap where
+it is the engine holds 59% of the squared error, the 13% under braking
+holds 28%, and the 4% at the cornering limit holds 13%. Nearly half of
+it all lies in the last 200m before the braking points, where the
+simulated car is about 4 km/h too fast. At Monza and Spa it starts the
+long straights 4 to 10 km/h too slow, and at all three it arrives 6 to
+10 km/h too fast. At the cornering limit it is 1 to 8 km/h too slow on
+average and 16 to 17 km/h out rms: too slow at some corners, too fast
+at others.
 
 One line number for a whole circuit is a simplification, and those
 corner speeds show it. Two ways of doing better through the geometry
@@ -215,6 +214,79 @@ but the laps did not say how wide to make it (1.5m was best at Monza,
 4m or more at Bahrain), and the downforce found swung with the width. A
 racing line worked out from real track edges fitted no better than the
 map (see GEOMETRY). Why the corners differ is not yet known.
+
+WEIGHT, AIR AND POWER
+
+The laps cannot say what the car weighs. Take a car and give it 10%
+more weight, power, downforce and drag. Every force on it is 10% bigger
+and so is the mass those forces have to move, so it gains speed, slows
+and corners just as before, and laps in exactly the same time. (Its
+tyres lose a little grip under the extra load, the same share at every
+speed, and line and the two shares of grip take that up.) What the
+laps pin down is power for each kilogram, and downforce and drag for
+each kilogram in the air of the day. The weight and the air have to be
+known some other way, and they set the size of the other three.
+
+build_reference() takes the weight from the rules: the least a car may
+weigh that season, plus the fuel left on the lap being fitted (see
+race_weight). Fuel loads are not published, so the fuel is an
+estimate: 100kg at the start (70kg from 2026), burned evenly. The
+fastest lap of a race usually comes near the end, on little fuel,
+where the estimate matters least. If the real car is 2% heavier than
+this says, its real power, downforce and drag are 2% higher than the
+fitted ones, and the 10kg line of the setup table is 2% out. The rest
+of the table does not change.
+
+The air comes from the weather FastF1 records with each lap (see
+density_of_air). On four real race days it was 1.14 to 1.19 kg/m3, 3
+to 7% thinner than the 1.225 of a standard day at sea level. In Mexico
+City it is about a quarter thinner. Downforce and drag are both in
+proportion to it, so if the air figure is 2% out the fitted downforce
+and drag are 2% out. The setup table does not change at all.
+
+With the weight known the power can be fitted, and it has to be. This
+file used to run every lap at 850kg and 760kW, which is 894W for each
+kilogram. Real laps ask for less: 640 to 850W on four races from 2020
+to 2022. With only the weight put right the fit got worse, because the
+lighter car had still more power for each kilogram. So fit_multi() now
+fits the power, one figure for all the circuits fitted together. On
+Monza and Spa in 2020 (one car, a week apart) it comes out at 592kW,
+and the drag number falls from 1.55 to 1.29 at Monza and from 1.86 to
+1.54 at Spa.
+
+That power is not the engine's rating, which for an F1 car is about
+750kW. It is what reaches the road on average while the car is flat
+out, after everything the model leaves out: losses on the way to the
+wheels, the tyres' rolling resistance, gear changes, and the battery
+running low before the end of a long straight.
+
+One power for every circuit suits laps from one season. For laps from
+different seasons the fit can find a power for each circuit instead
+(see fit_multi). How far to trust a power found from one circuit alone
+depends on how well that circuit's corners are matched, because the
+fit moves the power to make up for corners it has wrong. With the
+Monza and Spa laps placed on the middle of the road, where every
+corner is wrong, the fit asked for 746kW. Two checks:
+  - On 16 real laps (eight drivers at Monza and at Spa in 2020, each
+    fitted on his own two laps) the four cars with Mercedes engines
+    came out within 1.3% of their average at Monza and 3.1% at Spa.
+    The same driver's car came out 2% stronger at Spa than at Monza on
+    average, give or take 4%.
+  - On made-up laps where every corner asked for its own line, as real
+    corners do, a power fitted for one circuit alone was typically 5%
+    out and 18% out one time in ten, and the drag went with it. One
+    power for all three circuits was typically 3% out and 6% out one
+    time in ten.
+
+The lap times agree a little less well than they did. At Monza the
+simulated lap is now 0.3s slower than the real one, where it had been
+within 0.1s. It agreed for the wrong reason. A lap time is the sum of
+errors that pull both ways: the simulated car is slower than the real
+one out of the corners and through some of them, and quicker at the end
+of the straights. With too much power the two happened to cancel. The
+fit matches the speed at every point and takes little notice of the lap
+time, and the speeds are now closer (see Where the fit is still out,
+under FITTING).
 
 STEPPING
 
@@ -300,6 +372,7 @@ class Car:
     brake_fraction: float = 1.0       # share of grip usable under braking
     max_tractive_force: float = 1e9   # N, torque limit at low speed
     drs_cda_delta: float = 0.0        # drag reduction when DRS is open
+    air_density: float = AIR_DENSITY  # kg/m3, the air it is running in
 
     def __post_init__(self):
         # Store plain Python numbers. The optimiser hands over numpy ones,
@@ -310,11 +383,11 @@ class Car:
                 setattr(self, item.name, value.item())
 
     def downforce(self, speed):
-        return 0.5 * AIR_DENSITY * self.cla * speed ** 2
+        return 0.5 * self.air_density * self.cla * speed ** 2
 
     def drag(self, speed, drs=False):
         cda = self.cda - (self.drs_cda_delta if drs else 0.0)
-        return 0.5 * AIR_DENSITY * cda * speed ** 2
+        return 0.5 * self.air_density * cda * speed ** 2
 
     def normal_load(self, speed):
         return self.mass * GRAVITY + self.downforce(speed)
@@ -336,6 +409,11 @@ class Car:
     def grip_force(self, speed):
         return self.effective_mu(speed) * self.normal_load(speed)
 
+# A believable F1 car to start a fit from, not a measured one. A fit
+# replaces its downforce, drag, power and the two shares of grip, and
+# each real lap brings its own weight and air (see WEIGHT, AIR AND POWER
+# in the notes above). What a fit keeps from here is the tyre (mu,
+# load_sensitivity, reference_load), brake_limit and max_tractive_force.
 F1_2024 = Car(
     name="F1 2024",
     mass=850.0,
@@ -350,6 +428,58 @@ F1_2024 = Car(
     max_tractive_force=18_000.0,
     drs_cda_delta=0.30,
 )
+
+# The least an F1 car may weigh with its driver on board and no fuel, in
+# kg, by season. From the technical regulations. Sources differ by a
+# kilogram or two for some seasons, which is far less than the doubt in
+# the fuel.
+F1_MINIMUM_WEIGHT = {2018: 733.0, 2019: 743.0, 2020: 746.0, 2021: 752.0,
+                     2022: 798.0, 2023: 798.0, 2024: 798.0, 2025: 800.0,
+                     2026: 768.0}
+
+# Fuel on board at the start of a race, in kg. Fuel loads are not
+# published, so these are estimates. Formula 1's own figures are about
+# 100kg used in a race in 2020, and 70kg aimed for under the rules that
+# began in 2026. agent.py uses the same 100kg to correct lap times.
+FUEL_START = 100.0
+FUEL_START_2026 = 70.0
+
+def fuel_at_start(year):
+    """Estimated fuel on board at the start of a race that season, kg."""
+    return FUEL_START_2026 if year >= 2026 else FUEL_START
+
+def race_weight(year, lap_number, total_laps):
+    """What an F1 car weighed on one lap of a race, in kg, or None.
+
+    The least the rules allow that season, plus the fuel still on board
+    at the start of the lap. The fuel is taken to be burned evenly, from
+    fuel_at_start() on the first lap to nothing at the end of the last.
+    None if the season is not in F1_MINIMUM_WEIGHT.
+    """
+    if year not in F1_MINIMUM_WEIGHT or not total_laps:
+        return None
+    left = max(1 - (lap_number - 1) / total_laps, 0.0)
+    return F1_MINIMUM_WEIGHT[year] + fuel_at_start(year) * left
+
+def density_of_air(celsius, millibar, humidity=0.0):
+    """How heavy the air is, in kg/m3.
+
+    celsius is the air's temperature, millibar its pressure and humidity
+    its relative humidity in per cent. Warm air, thin air (high up, or
+    low pressure on the day) and damp air are all lighter, and downforce
+    and drag are both in proportion to the density.
+
+    For dry air, density = pressure / (287.05 x temperature in kelvin).
+    Water vapour is lighter than the air it pushes aside, so its share
+    of the pressure is divided by 461.5 instead.
+    """
+    kelvin = celsius + 273.15
+    # The most vapour pressure air can hold at this temperature (the
+    # Magnus formula), then what it does hold, both in pascals
+    most = 610.94 * math.exp(17.625 * celsius / (celsius + 243.04))
+    vapour = humidity / 100.0 * most
+    dry = millibar * 100.0 - vapour
+    return dry / (287.05 * kelvin) + vapour / (461.5 * kelvin)
 
 # ---------------------------------------------------------------------------
 # Track geometry
@@ -767,7 +897,7 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
 
 def _terminal_speed(car):
     """Top speed, where all the power goes into beating drag."""
-    return (car.power / (0.5 * AIR_DENSITY * car.cda)) ** (1 / 3)
+    return (car.power / (0.5 * car.air_density * car.cda)) ** (1 / 3)
 
 def _time_along(step, speed):
     """Seconds taken to cover a line, given the speed in m/s at each of
@@ -984,6 +1114,9 @@ class Reference:
     lap_choice: str = "lap"      # which lap this is, and why that one
     driver: str = ""             # whose lap it is, as a three-letter code
     eased: str = ""              # where the map was eased, if anywhere
+    mass: float = None           # kg the car weighed on this lap, if known
+    air_density: float = None    # kg/m3 on the day, if known
+    conditions: str = ""         # where those two numbers came from
     notes: list = field(default_factory=list)   # problems found in the data
 
 def lap_error(track, car, reference):
@@ -1063,17 +1196,22 @@ def lap_residuals(track, car, reference, time_weight=1.0, top_weight=3.0):
 
     return np.concatenate([speed, [timing, top]])
 
+# The range each fitted number may take. These suit an F1 car. Any
+# other kind of car needs its own: a Formula Student car has about a
+# tenth of the power.
 SHARED_BOUNDS = {
     'mu': (0.5, 2.5),
     'load_sensitivity': (0.0, 0.4),
     'drive_fraction': (0.2, 1.0),
     'brake_limit': (3.0, 9.0),
     'brake_fraction': (0.2, 1.5),
+    'power': (300_000.0, 1_000_000.0),
 }
 CIRCUIT_BOUNDS = {
     'cla': (2.5, 7.5),
     'cda': (0.8, 2.5),
     'line': (0.3, 1.5),
+    'power': (300_000.0, 1_000_000.0),
 }
 
 def straightened(track, line):
@@ -1081,7 +1219,7 @@ def straightened(track, line):
 
     line is a factor on the map's curvature: 1 is the map itself, 0.8 a
     track that bends 0.8 times as much everywhere. The real laps ask for
-    about 0.8. What that stands for is not settled: real cars taking
+    0.8 to 0.9. What that stands for is not settled: real cars taking
     wider arcs than the map by using the kerbs, or more cornering grip
     than the tyre figure allows, or some of each (see GEOMETRY and
     FITTING in the notes at the top of this file).
@@ -1092,7 +1230,7 @@ def straightened(track, line):
     return replace(track, curvature=track.curvature * line)
 
 def fit_multi(references, base_car,
-              shared=('brake_fraction', 'drive_fraction'),
+              shared=('brake_fraction', 'drive_fraction', 'power'),
               per_circuit=('cla', 'cda', 'line'),
               verbose=True):
     """Fit one car across several circuits at once.
@@ -1100,9 +1238,20 @@ def fit_multi(references, base_car,
     What is fitted, and what is not:
       - The tyre's grip (mu) is NOT fitted. It is taken from base_car,
         like load_sensitivity, as something known about the tyre.
+      - The car's weight and the air's density are NOT fitted. They
+        come with each reference where it knows them (see
+        build_reference), and from base_car where it does not.
       - brake_fraction and drive_fraction are shared by every circuit:
         the share of that grip the car uses under braking and under
         power. They belong to the car and its driver.
+      - power is shared by every circuit too. It is not the engine's
+        rating: it is what the car puts down on average while it is
+        flat out (see WEIGHT, AIR AND POWER in the notes at the top of
+        this file). One figure for all the circuits suits laps from
+        one season, where the engines are within a few per cent of
+        each other. For laps from different seasons, fit a power for
+        each circuit: take 'power' out of shared and put it in
+        per_circuit.
       - cla and cda are fitted per circuit, because teams genuinely run
         different wing levels.
       - line is fitted per circuit: the factor on the map's curvature
@@ -1149,6 +1298,10 @@ def fit_multi(references, base_car,
             f"Cannot fit {', '.join(unknown)}. shared can hold "
             f"{', '.join(SHARED_BOUNDS)}; per_circuit can hold "
             f"{', '.join(CIRCUIT_BOUNDS)}.")
+    twice = [name for name in shared if name in per_circuit]
+    if twice:
+        raise ValueError(f"{', '.join(twice)} cannot be both shared and "
+                         f"per circuit. Put it in one list or the other.")
     if ('mu' in shared and 'brake_fraction' in shared
             and 'drive_fraction' in shared and 'line' in per_circuit):
         raise ValueError("mu, brake_fraction, drive_fraction and line "
@@ -1163,6 +1316,15 @@ def fit_multi(references, base_car,
                      + [CIRCUIT_BOUNDS[name][1] for _ in range(n)
                         for name in per_circuit])
 
+    def on_the_day(reference):
+        # What a reference knows about its car without any fitting
+        known = {}
+        if reference.mass is not None:
+            known['mass'] = reference.mass
+        if reference.air_density is not None:
+            known['air_density'] = reference.air_density
+        return known
+
     def unpack(values):
         shared_values = {name: float(value) for name, value
                          in zip(shared, values[:len(shared)])}
@@ -1175,7 +1337,8 @@ def fit_multi(references, base_car,
             cursor += len(per_circuit)
             # line belongs to the track, everything else to the car
             line = own.pop('line', 1.0)
-            cars.append(replace(base_car, **shared_values, **own))
+            cars.append(replace(base_car, **on_the_day(reference),
+                                **shared_values, **own))
             tracks.append(straightened(reference.track, line))
         return shared_values, cars, tracks
 
@@ -1260,21 +1423,30 @@ def fit_multi(references, base_car,
                     if min(value - low, high - value) < 0.01 * (high - low)
                     else "")
 
+        def shown(name, value):
+            # Power reads better in kW than in W to three places
+            return (f"{value / 1000:.0f}kW" if name == 'power'
+                    else f"{value:.3f}")
+
         if 'mu' not in shared:
             print(f"\n  Tyre grip taken as {base_car.mu:.2f} (assumed, not "
                   f"fitted).")
         print("  Shared by every circuit:")
         for name, value in shared_values.items():
-            print(f"    {name}: {getattr(base_car, name):.3f} "
-                  f"-> {value:.3f}{at_bound(value, SHARED_BOUNDS[name])}")
-        print("\n  Per circuit (aero, and line: the factor on the map's "
-              "curvature that the laps ask for):")
+            print(f"    {name}: {shown(name, getattr(base_car, name))} "
+                  f"-> {shown(name, value)}"
+                  f"{at_bound(value, SHARED_BOUNDS[name])}")
+        if 'power' in shared or 'power' in per_circuit:
+            print("  (power is what the car puts down on average while "
+                  "flat out, not the engine's rating)")
+        print("\n  Per circuit (line is the factor on the map's curvature "
+              "that the laps ask for):")
         cursor = len(shared)
         for reference in references:
             own = outcome.x[cursor:cursor + len(per_circuit)]
             cursor += len(per_circuit)
             print(f"    {reference.track.name}: "
-                  + ", ".join(f"{name} {value:.3f}"
+                  + ", ".join(f"{name} {shown(name, value)}"
                               + at_bound(value, CIRCUIT_BOUNDS[name])
                               for name, value in zip(per_circuit, own)))
 
@@ -1607,6 +1779,37 @@ def _fastest_driver(laps):
                          "instead.")
     return str(lap['Driver'])
 
+def _air_for(lap):
+    """The density of the air a lap was driven in, and a sentence on it.
+
+    Read from the weather FastF1 records with the lap: the air's
+    temperature, pressure and humidity. The density is None if there is
+    no weather to read, or if it gives air no race has been run in.
+    """
+    try:
+        weather = lap.get_weather_data()
+        celsius = float(weather['AirTemp'])
+        millibar = float(weather['Pressure'])
+        humidity = float(weather['Humidity'])
+        if not (math.isfinite(celsius) and math.isfinite(millibar)):
+            raise ValueError("no temperature or no pressure")
+    except Exception:
+        return None, "no weather data, so the base car's air is used"
+
+    if not math.isfinite(humidity):
+        humidity = 0.0      # it changes the answer by 1% at most
+    density = density_of_air(celsius, millibar, humidity)
+
+    # A cold day at sea level is about 1.3 kg/m3. Mexico City, the
+    # highest circuit F1 races on, is about 0.9. Anything well outside
+    # those is a fault in the weather data.
+    if not 0.7 < density < 1.45:
+        return None, (f"the weather data gives air of {density:.2f} kg/m3, "
+                      f"which cannot be right, so the base car's air is "
+                      f"used")
+    return density, (f"air {density:.3f} kg/m3 ({celsius:.0f}C, "
+                     f"{millibar:.0f}mbar)")
+
 def build_reference(year, race, driver=None, spacing=1.0, lam=None,
                     max_laps=60, drag_limited=True,
                     most_g=MOST_LATERAL_G):
@@ -1626,6 +1829,12 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
     Last, kinks in the map are eased: short stretches where it asks for
     more than most_g of sideways acceleration at the speed the real car
     went (see _eased). The reference's `eased` says where, if anywhere.
+
+    The reference also carries two things about the day that the fit
+    needs and cannot find for itself: what the car weighed on that lap
+    (see race_weight) and how dense the air was (see density_of_air,
+    from the weather FastF1 records). Its `conditions` says what they
+    were and where they came from.
     """
     import telemetry
 
@@ -1709,6 +1918,31 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
                 official_time, fastest, fastest_pos = lap_time, lap, pos
                 drs_open = 0.0
                 break
+
+    # What the car weighed on that lap, and the air it ran in. The laps
+    # cannot say either (see WEIGHT, AIR AND POWER in the notes at the
+    # top of this file), so both come from outside: the rules and the
+    # lap number, and the weather recorded during the session.
+    lap_number = int(fastest['LapNumber'])
+    try:
+        # How many laps the race was planned to run
+        total_laps = int(session.total_laps)
+    except Exception:
+        try:
+            total_laps = int(np.nanmax(session.laps['LapNumber']))
+        except Exception:
+            total_laps = None
+    mass = race_weight(year, lap_number, total_laps)
+    if mass is None:
+        weight = "weight on this lap not known, so the base car's is used"
+    else:
+        least = F1_MINIMUM_WEIGHT[year]
+        weight = (f"car taken as {mass:.0f}kg (the {least:.0f}kg the rules "
+                  f"allow plus {mass - least:.0f}kg of fuel: lap "
+                  f"{lap_number} of {total_laps}, from an estimated "
+                  f"{fuel_at_start(year):.0f}kg at the start)")
+
+    density, air = _air_for(fastest)
 
     pos_time = seconds(fastest_pos['SessionTime'])
     positions = [(fastest_pos['X'].to_numpy(), fastest_pos['Y'].to_numpy())]
@@ -1867,6 +2101,9 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
                      lap_choice=lap_choice,
                      driver=driver,
                      eased=eased,
+                     mass=mass,
+                     air_density=density,
+                     conditions=f"{weight}; {air}",
                      notes=notes)
 
 # ---------------------------------------------------------------------------
@@ -1948,22 +2185,23 @@ def setup_effects(track, car, changes=SETUP_CHANGES):
     a wing is roughly the downforce line plus the drag line, each scaled
     to what the wing really gives.
 
-    How far to trust them. Tested on 80 made-up sessions with a known
-    car, each fitted from data with the faults real data has. What
+    How far to trust them. Tested on 84 made-up sessions with a known
+    car, each fitted from data with the faults real data has, and the
+    fit told the weight and the air as it is for a real lap. What
     matters most is whether the corners all ask for the same line
     number (see FITTING in the notes at the top of this file).
-      - Where they did (54 sessions), every figure was within 10% of
+      - Where they did (56 sessions), every figure was within 9% of
         the truth nine times in ten.
-      - Where each corner asked for its own (26 sessions), as on real
-        laps, the drag, power and grip figures were within 9, 10 and
-        13% nine times in ten. The downforce figure was typically 14%
-        out and 46% at worst. The mass figure was typically 10% out and
-        26% at worst.
+      - Where each corner asked for its own (28 sessions), as on real
+        laps, the drag, power and grip figures were within 8, 10 and
+        12% nine times in ten. The downforce figure was typically 14%
+        out and 45% at worst. The mass figure was typically 11% out and
+        29% at worst.
     So on real circuits trust the drag and power figures most, and
     treat the downforce and mass figures as rough. There is one check
     from outside: teams reckon 10kg of fuel costs about 0.3s a lap, and
-    on real fitted circuits this gives 0.23s at Monza, 0.22s at Bahrain
-    and 0.31s at Spa.
+    on real fitted circuits this gives 0.26s at Monza, 0.29s at Bahrain
+    and 0.35s at Spa.
 
     Returns a dict of {what the change is called: seconds}.
     """
@@ -2020,6 +2258,9 @@ if __name__ == '__main__':
               f"{reference.lap_time:.3f}s along this line")
         print(f"  {reference.track.source}")
         print(f"  {reference.clock}")
+        # The weight and the air, on a line each
+        for part in reference.conditions.split('; '):
+            print(f"  {part}")
         if reference.eased:
             print(f"  {reference.eased}")
         for note in reference.notes:
@@ -2069,6 +2310,11 @@ if __name__ == '__main__':
                          "Set CHECK_ONLY = False to run the fit.")
 
     print("\nFitting...")
+    # One power is fitted for all the circuits, which suits laps from
+    # one season. For laps from different seasons, fit a power for each:
+    #   fit_multi(references, F1_2024,
+    #             shared=('brake_fraction', 'drive_fraction'),
+    #             per_circuit=('cla', 'cda', 'line', 'power'))
     shared_values, cars, tracks, outcome = fit_multi(references, F1_2024)
 
     # tracks are the references' tracks with each circuit's line applied
@@ -2126,7 +2372,7 @@ if __name__ == '__main__':
     axes[-1].set_xlabel('Distance (m)')
 
     style.title(fig, "Multi-circuit fit",
-                "Tyre grip held. Braking and drive shares fitted for all "
-                "circuits, aero and line for each.")
+                "Tyre grip held. Braking share, drive share and power "
+                "fitted for all circuits; aero and line for each.")
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.show()
