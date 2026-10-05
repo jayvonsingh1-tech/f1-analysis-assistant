@@ -791,14 +791,23 @@ def lap_residuals(track, car, reference, time_weight=1.0, top_weight=3.0):
 
     A least-squares fit makes the sum of these squared as small as it
     can, so each kind of difference is scaled to count the right amount:
-      - the relative speed error at every point, scaled so that together
-        they add up to the mean squared speed error
+      - the relative speed error at every point, each weighted by the
+        share of the lap's time the real car spends there, so that
+        together they add up to the mean squared speed error over the
+        lap's time
       - the relative lap-time error, times time_weight
       - the relative top-speed error, times top_weight, only where the
         car reaches terminal speed (see lap_error)
 
     The speed trace carries most of the weight. The top-speed term is
     weighted up because top speed is what pins the drag.
+
+    Why by time and not by distance. A lap is won and lost in seconds,
+    and a metre of slow corner takes several times longer to cover than
+    a metre of straight. Counting every metre the same lets the long
+    fast stretches outvote the corners. Tested on made-up laps with a
+    known car: weighting by time brought the fitted grip a third closer
+    to the truth and cut the lap-time error by a third.
     """
     actual = reference.speed_kph / 3.6
     try:
@@ -806,8 +815,13 @@ def lap_residuals(track, car, reference, time_weight=1.0, top_weight=3.0):
     except Exception:
         return np.ones(len(actual) + 2)
 
+    # Time spent at each point is step / speed, so the shares are
+    # proportional to 1 / speed
+    share = 1.0 / np.maximum(actual, 1.0)
+    share = share / share.sum()
+
     speed = ((result.speed - actual) / np.maximum(actual, 1.0)
-             / math.sqrt(len(actual)))
+             * np.sqrt(share))
     timing = (time_weight * (result.lap_time - reference.lap_time)
               / reference.lap_time)
     top = 0.0
@@ -1219,11 +1233,11 @@ def braking_check(references, base_car, outcome,
 
     How to read the result. Tested on made-up laps with a known car:
       - where the car braked at the full limit, brake_fraction still
-        came out at 0.83 to 0.96 and the squared differences fell by 14
+        came out at 0.83 to 0.94 and the squared differences fell by 13
         to 27%, because it also soaks up geometry error at corner
         entries
       - where the car braked at 75 to 85% of the limit, it came out at
-        0.68 to 0.82 and they fell by 60 to 90%
+        0.68 to 0.81 and they fell by 57 to 87%
     The size of the fall separates the two cases more cleanly than the
     value does.
 
@@ -1401,9 +1415,9 @@ if __name__ == '__main__':
               f"drive_fraction {freed['drive_fraction']:.3f}, "
               f"squared differences down {improvement:.0%}")
         print("  A car braking at the tyres' full limit reads 0.83 to "
-              "0.96 and 14 to 27% here.")
-        print("  One braking at 75 to 85% of it reads 0.68 to 0.82 and "
-              "60 to 90%.")
+              "0.94 and 13 to 27% here.")
+        print("  One braking at 75 to 85% of it reads 0.68 to 0.81 and "
+              "57 to 87%.")
 
     fig, axes = plt.subplots(len(references), 1,
                              figsize=(13, 3 * len(references)))
