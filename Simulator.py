@@ -77,20 +77,42 @@ takes about 2 at many corners and up to 2.7. So the fit carries one
 more number for each circuit, line, which scales the map's curvature
 (see FITTING). It comes out near 0.8.
 
-This file first read that as the car driving a straighter line than the
-map. That does not hold. With the real laps placed on the database's
-racing line the fit still wanted 0.80 at Monza and 0.84 at Spa, against
-0.78 and 0.82 on the map, and fitted no better. (On the middle of the
-road it wanted 0.45 to 0.50.) So most of what line corrects is not the
-line. The likeliest cause left is that the car has about a quarter more
-cornering grip than the tyre figure used here. Kerbs beyond the edges
-and faults in the map may be part of it. The laps cannot say which (see
-FITTING), and it has not been settled.
+What line stands for is not settled, and the laps cannot settle it (see
+FITTING): a car with more cornering grip than the tyre figure used here
+laps exactly like a car taking wider arcs than the map. A racing line
+worked out inside the edges of the road does not account for it. With
+the real laps placed on the database's own racing line the fit still
+wanted 0.80 at Monza and 0.84 at Spa, against 0.78 and 0.82 on the map,
+and fitted no better. (On the middle of the road it wanted 0.45 to
+0.50.) So the map is about as good as a line inside the edges gets.
 
-Always check implied lateral acceleration (v^2 * curvature) before
-fitting. Well above 6g means the map is a poor guide to the driven line
-there: Monaco's Swimming Pool and the fast sweeps at Jeddah are
-examples.
+What evidence there is points to real cars taking wider arcs than that,
+over the kerbs and beyond the edges. Cornering on the map takes a
+quarter more grip than the hardest braking shows the tyres to have. On
+a 2024 race lap the map asks for 6.5g at Barcelona, more than F1 cars
+are credited with. At Abbey, the first corner at Silverstone, even the
+database's racing line asks for 7.2g at the 297 km/h the cars take it
+flat out. And corners that turn through a smaller angle tend to need a
+lower line (22 corners, correlation 0.4), which is what using more road
+would do: width buys far more radius in a short bend than a long one.
+
+In places the map asks for the impossible. At Abbey the 2024 map asks
+for 10.2g at the real speed. Left alone, one kink like that spoils a
+whole circuit's fit: the simulated car slowed from 297 to 191 km/h
+there and lost 0.8s, and the fit is pulled towards more downforce to
+get the car through it. Jeddah in 2021 has six such kinks, of 7 to
+11g. So build_reference() eases them. Wherever a stretch of 50m or less
+asks for more than MOST_LATERAL_G at the real speed, the bend is eased
+to the tightest one that speed allows (see _eased), and the loading
+report says where. At Jeddah that is 159m in all. Fitted together with
+Bahrain, the fit's squared error falls by 37%, and Jeddah's lap comes
+out 0.36s from the real one where it was 0.85s. At Monza and Bahrain
+nothing is eased, and at Spa 9m.
+
+Longer stretches are left alone and reported. A long stretch over the
+limit is a whole corner the map has too tight, and easing whole corners
+hides them from the fit. Easing also only catches what is impossible
+outright. A corner the map has a fifth too tight, as at Ascari, passes.
 
 SPEED AND POSITION CLOCKS
 
@@ -163,9 +185,8 @@ laps pin down three things: grip over line (the corners), grip times
 brake_fraction, and grip times drive_fraction. Four numbers cannot be
 had from three. So mu is held at 1.75 at its reference load, which
 agrees with the hardest braking seen on the real laps, and line takes
-up the rest. Since the map already follows a racing line, the second
-car is probably nearer the truth: more cornering grip than 1.75 and a
-line near 1. The laps, and what a setup change is worth, come out
+up the rest. Which of the two cars is nearer the truth is not settled
+(see GEOMETRY). The laps, and what a setup change is worth, come out
 exactly the same either way.
 
 A brake_fraction of 0.6 does not mean weak brakes. The model brakes at
@@ -231,6 +252,14 @@ from scipy.stats import theilslopes
 
 GRAVITY = 9.81
 AIR_DENSITY = 1.225      # kg/m3 at sea level, 15C
+
+# The most sideways acceleration the kind of car being fitted can have,
+# in g. An F1 car peaks at 5 to 6g. Where a short stretch of the map
+# asks for more than this at the speed the real car went,
+# build_reference() takes the map to be wrong and eases it (see GEOMETRY
+# in the notes above). Any other kind of car has far less, so set this
+# for the car.
+MOST_LATERAL_G = 6.0
 
 # ---------------------------------------------------------------------------
 # Car
@@ -934,6 +963,7 @@ class Reference:
     stream_offset: float = None  # seconds the speed clock was corrected by
     clock: str = ""              # what was found about the two clocks
     lap_choice: str = "lap"      # which lap this is, and why that one
+    eased: str = ""              # where the map was eased, if anywhere
     notes: list = field(default_factory=list)   # problems found in the data
 
 def lap_error(track, car, reference):
@@ -1031,11 +1061,10 @@ def straightened(track, line):
 
     line is a factor on the map's curvature: 1 is the map itself, 0.8 a
     track that bends 0.8 times as much everywhere. The real laps ask for
-    about 0.8. That was first read as the car driving a straighter line
-    than the map. But the map already follows a racing line, so most of
-    it is something else, probably more cornering grip than the tyre
-    figure allows (see GEOMETRY and FITTING in the notes at the top of
-    this file).
+    about 0.8. What that stands for is not settled: real cars taking
+    wider arcs than the map by using the kerbs, or more cornering grip
+    than the tyre figure allows, or some of each (see GEOMETRY and
+    FITTING in the notes at the top of this file).
 
     One number for a whole circuit is a simplification. On real laps
     the corners do not all ask for the same.
@@ -1482,8 +1511,72 @@ def _speed_by_distance(track, pos_time, x, y, car_time, speed_kph, offset,
         return None
     return np.interp(track.distance, place[forward], speed[forward])
 
+def _eased(track, speed_kph, most_g, longest=50.0):
+    """Ease the kinks that the real car's speed proves the map wrong on.
+
+    The real car went through every point at a known speed. Speed
+    squared times curvature is the sideways acceleration that takes,
+    and no car of this kind has more than most_g. So wherever the map
+    asks for more, it is the map that is wrong, and the bend is eased to
+    the tightest one that speed allows: most_g * g / speed^2.
+
+    Only short stretches are eased. A kink in the map is short: on real
+    races the stretches over 6g are 9 to 36m long. A stretch of more
+    than `longest` metres is a whole corner the map has too tight, and
+    easing whole corners hides them from the fit (tested on made-up
+    laps: it put the downforce figure 34% out where it had been 4%). So
+    those are left as they are and reported.
+
+    This only catches a bend that is impossible outright. A bend the map
+    has a little too tight passes.
+
+    Returns the track, a sentence on what was eased and a sentence on
+    what was left alone. A sentence is empty if there is nothing to
+    say, and with nothing eased the track is the one handed in. The
+    curvature as the map had it is kept in
+    track.channels['map_curvature'].
+    """
+    speed = np.maximum(np.asarray(speed_kph, dtype=float) / 3.6, 1.0)
+    needs = speed ** 2 * track.curvature / GRAVITY
+    over = needs > most_g
+    if not over.any():
+        return track, "", ""
+
+    # Each unbroken stretch over the limit runs from a start up to, but
+    # not including, an end
+    switches = np.flatnonzero(np.diff(np.concatenate(
+        [[False], over, [False]]).astype(int)))
+    ease = np.zeros(len(over), dtype=bool)
+    long_ones = []
+    for start, end in zip(switches[::2], switches[1::2]):
+        if (end - start) * track.step <= longest:
+            ease[start:end] = True
+        else:
+            long_ones.append(f"{(end - start) * track.step:.0f}m at "
+                             f"{track.distance[start]:.0f}m")
+
+    left = ""
+    if long_ones:
+        left = (f"the map asks for more than {most_g:g}g for "
+                f"{', '.join(long_ones)}. That is too long to be a kink, "
+                f"so it was left alone: the map may have whole corners "
+                f"too tight here")
+    if not ease.any():
+        return track, "", left
+
+    curvature = np.where(ease, most_g * GRAVITY / speed ** 2,
+                         track.curvature)
+    worst = int(np.argmax(np.where(ease, needs, 0.0)))
+    channels = dict(track.channels, map_curvature=track.curvature)
+    said = (f"map eased over {ease.sum() * track.step:.0f}m, where it "
+            f"asked for more than {most_g:g}g at the real speed (worst "
+            f"{needs[worst]:.1f}g, at {track.distance[worst]:.0f}m)")
+    return (replace(track, curvature=curvature, channels=channels), said,
+            left)
+
 def build_reference(year, race, driver, spacing=1.0, lam=None,
-                    max_laps=60, drag_limited=True):
+                    max_laps=60, drag_limited=True,
+                    most_g=MOST_LATERAL_G):
     """Load a driver's laps and prepare a reference for fitting.
 
     Geometry is pooled from up to max_laps clean laps. Every lap lies on
@@ -1492,6 +1585,10 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
     shut. Its clock is lined up with the position data's first (see
     _stream_offset), and each speed sample is then placed on the track
     by how far the car had travelled (see _speed_by_distance).
+
+    Last, kinks in the map are eased: short stretches where it asks for
+    more than most_g of sideways acceleration at the speed the real car
+    went (see _eased). The reference's `eased` says where, if anywhere.
     """
     import telemetry
 
@@ -1708,6 +1805,12 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
     speed_kph = track.channels['speed_kph']
     along_line = _time_along(track.step, speed_kph / 3.6)
 
+    # Where the map asks for more than a car can do at the speed the
+    # real one went, the map is wrong there
+    track, eased, left_alone = _eased(track, speed_kph, most_g)
+    if left_alone:
+        notes.append(left_alone)
+
     # The line covers all but the last few metres of the lap, so the two
     # times should agree to well within 1%
     if not 0.99 < along_line / official_time < 1.01:
@@ -1723,6 +1826,7 @@ def build_reference(year, race, driver, spacing=1.0, lam=None,
                      stream_offset=stream_offset,
                      clock=clock,
                      lap_choice=lap_choice,
+                     eased=eased,
                      notes=notes)
 
 # ---------------------------------------------------------------------------
@@ -1850,9 +1954,9 @@ if __name__ == '__main__':
 
     # (year, race, driver, spline stiffness - None to work it out,
     #  does the car reach terminal speed?)
-    # Monaco is left out: it fails the geometry check at 11g, in the two
-    # Swimming Pool chicanes, where the map is a poor guide to the line
-    # the cars really take.
+    # Monaco is left out: its map asked for 11g in the two Swimming Pool
+    # chicanes. Kinks like that are now eased (see _eased), so it may be
+    # worth trying again.
     setups = [
         (2024, 'Monza', 'NOR', None, True),
         # (2024, 'Monaco', 'LEC', None, False),
@@ -1871,20 +1975,27 @@ if __name__ == '__main__':
               f"{reference.lap_time:.3f}s along this line")
         print(f"  {reference.track.source}")
         print(f"  {reference.clock}")
+        if reference.eased:
+            print(f"  {reference.eased}")
         for note in reference.notes:
             print(f"  WARNING: {note}")
         references.append(reference)
 
-    print("\nGeometry check (the map at the real speed; real F1 cars "
-          "peak around 5-6g):")
+    print("\nGeometry check (the map as it came, at the real speed; real "
+          "F1 cars peak around 5-6g):")
     lateral = []
     for reference in references:
         track = reference.track
         speed_ms = reference.speed_kph / 3.6
-        g = speed_ms ** 2 * track.curvature / GRAVITY
+        # The map before any easing, which is what is being checked
+        on_map = track.channels.get('map_curvature', track.curvature)
+        g = speed_ms ** 2 * on_map / GRAVITY
         lateral.append(g)
-        print(f"  {track.name}: peak {np.nanmax(g):.1f}g, "
-              f"points above 6g: {int((g > 6).sum())}")
+        over = int((g > MOST_LATERAL_G).sum())
+        eased = int((track.curvature != on_map).sum())
+        print(f"  {track.name}: peak {np.nanmax(g):.1f}g, points above "
+              f"{MOST_LATERAL_G:g}g: {over}"
+              + (f" ({eased} eased for the fit)" if eased else ""))
 
     if CHECK_ONLY:
         # squeeze=False gives a grid of plots even when there is only
@@ -1895,8 +2006,8 @@ if __name__ == '__main__':
         for axis, reference, g in zip(axes, references, lateral):
             axis.plot(reference.track.distance, g,
                       color=style.DRIVER_B, linewidth=1)
-            axis.axhline(6, color=style.ACCENT, linewidth=0.8,
-                         linestyle='--')
+            axis.axhline(MOST_LATERAL_G, color=style.ACCENT,
+                         linewidth=0.8, linestyle='--')
             axis.set_ylabel('lateral g')
             axis.set_ylim(0, max(8, min(np.nanmax(g), 15)))
             axis.set_title(f"{reference.track.name}  peak "
@@ -1904,8 +2015,9 @@ if __name__ == '__main__':
                            color=style.TEXT, fontsize=11)
         axes[-1].set_xlabel('Distance (m)')
         style.title(fig, "Geometry check",
-                    "Dashed line is 6g. Narrow spikes are faults in "
-                    "the map; sustained plateaus are real corners.")
+                    f"Dashed line is {MOST_LATERAL_G:g}g. Narrow spikes "
+                    "above it are faults in the map, and are eased for "
+                    "the fit; sustained plateaus are real corners.")
         plt.tight_layout(rect=[0, 0, 1, 0.93])
         plt.show()
         raise SystemExit("\nGeometry check only. "
