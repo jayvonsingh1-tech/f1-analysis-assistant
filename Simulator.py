@@ -7,8 +7,9 @@ the three at each point is the speed the car can actually carry.
 
 Geometry and car are described separately from the physics, so the same
 simulator runs any car on any line. Track geometry currently comes from
-FastF1's position data, which turns out to be a map of the circuit and
-not the line each car drove (see GEOMETRY).
+FastF1's position data, which turns out to be one map of the circuit,
+the same for every car, and not the line each car drove. The map itself
+follows a racing line (see GEOMETRY).
 
 MODEL ASSUMPTIONS AND LIMITATIONS
 
@@ -23,6 +24,12 @@ Not modelled:
     there is one, and warns where there is not)
   - tyre temperature, wear, camber and track surface
   - elevation change, banking and kerbs
+  - the car's weight and the air on the day: every lap is run at 850kg
+    in sea-level air. A real car weighs its minimum plus the fuel left,
+    and on four real race days the air was 3.5 to 7% thinner. Tested on
+    made-up laps with a car 60kg lighter and 60kW weaker than assumed:
+    what a setup change is worth hardly moved, but the fitted downforce
+    came out 8 to 19% too high and the fitted drag 8 to 9% too high
 
 Grip sharing uses a friction ellipse, which assumes equal peak grip
 laterally and longitudinally.
@@ -53,17 +60,32 @@ second derivative, so a 30cm step looks like a 10g corner. Points more
 than 15cm from the fitted line are left out and the line is fitted
 again. At Spa in 2020 that took the worst point from 7.2g to 6.1g.
 
-The map bends more than the line a car really drives. That shows
-without any model, by working out how much grip the real lap uses at
-each point: the force at the tyres over the load on them (weight plus an
-assumed downforce). At the hardest braking of the lap the cars use 1.5
-to 1.7, which is about what a racing slick is good for. Cornering round
-the map at the real speed would take about 2 at many corners and up to
-2.7. A tyre does not have half as much grip again sideways as it has
-lengthways, so the corners the cars drove were not as tight as the
-map's. A real driver uses the width of the road. So the fit carries one
-more number for each circuit, line: the curvature the car really drives
-as a fraction of the map's (see FITTING).
+The map follows a racing line, not the middle of the road. Checked in
+October 2026 against real track edges (the TU Munich racetrack
+database, github.com/TUMFTM/racetrack-database) at Monza, Spa and
+Bahrain. Laid over the database's track, the map stays inside the edges
+and runs out, in and out through the corners. It leans off the middle
+of the road the same way the database's own racing line does, about two
+thirds as far.
+
+Even so, the real laps need more grip in the corners than the model car
+has. That shows without any model, by working out how much grip the
+real lap uses at each point: the force at the tyres over the load on
+them (weight plus an assumed downforce). At the hardest braking of the
+lap the cars use 1.5 to 1.7. Cornering round the map at the real speed
+takes about 2 at many corners and up to 2.7. So the fit carries one
+more number for each circuit, line, which scales the map's curvature
+(see FITTING). It comes out near 0.8.
+
+This file first read that as the car driving a straighter line than the
+map. That does not hold. With the real laps placed on the database's
+racing line the fit still wanted 0.80 at Monza and 0.84 at Spa, against
+0.78 and 0.82 on the map, and fitted no better. (On the middle of the
+road it wanted 0.45 to 0.50.) So most of what line corrects is not the
+line. The likeliest cause left is that the car has about a quarter more
+cornering grip than the tyre figure used here. Kerbs beyond the edges
+and faults in the map may be part of it. The laps cannot say which (see
+FITTING), and it has not been settled.
 
 Always check implied lateral acceleration (v^2 * curvature) before
 fitting. Well above 6g means the map is a poor guide to the driven line
@@ -115,48 +137,63 @@ give nearly the same lap. fit_multi() fits several circuits at once,
 sharing what belongs to the car and its driver while letting aero vary
 per circuit.
 
-Even then some numbers trade off against each other: a straighter line
-with less downforce gives nearly the same laps as a tighter one with
-more. So the error has a long shallow valley, and an optimiser that
+Even then some numbers trade off against each other: a lower line with
+less downforce gives nearly the same laps as a higher one with more. So
+the error has a long shallow valley, and an optimiser that
 stops anywhere along it looks converged when it is not. fit_multi()
 solves the fit as a least-squares problem, which follows the valley to
 its lowest point, and checks itself from a second starting point.
 
-The fit also carries line for each circuit, because the map bends more
-than the driven line (see GEOMETRY), and two shares of the tyre's grip:
+The fit also carries line for each circuit, a factor on the map's
+curvature (see GEOMETRY), and two shares of the tyre's grip:
 brake_fraction, how much of it the car uses under braking, and
-drive_fraction, how much it can put down under power. Without them the
-fit has to invent grip to get round the map's corners, and then finds
-the car braking and accelerating as if it had far less. With them the
-fit's sum of squared differences on real laps (Monza and Spa 2020,
-Bahrain 2022) falls by 40 to 65%, and they come out at line 0.77 to
-0.83, brake_fraction 0.6 to 0.74 and drive_fraction 0.47 to 0.49.
+drive_fraction, how much it can put down under power. Without them one
+grip figure has to serve the corners, the braking and the drive out of
+the corners, and the real laps want far more for the first than for the
+other two. With them the fit's sum of squared differences on real laps
+(Monza and Spa 2020, Bahrain 2022) falls by 40 to 65%, and they come
+out at line 0.77 to 0.83, brake_fraction 0.6 to 0.74 and drive_fraction
+0.47 to 0.49.
 
 The tyre's own grip, mu, is not fitted, because it cannot be. A car
-with a grip of 1.75 on a line 0.8 times as curved as the map, braking
-with 0.6 of its grip and driving with 0.48, laps exactly like one with
-a grip of 1.4 on a line 0.64 times as curved, braking with 0.75 and
-driving with 0.6. The laps pin down three things: grip over line (the
-corners), grip times brake_fraction, and grip times drive_fraction.
-Four numbers cannot be had from three. So mu is held at a believable
-figure for the tyre, 1.75 at its reference load, which agrees with the
-hardest braking seen on the real laps. If the real tyre has 10% more
-grip than that, line comes out 10% too low and both shares 10% too
-high. The laps, and what a setup change is worth, come out exactly the
-same.
+with a grip of 1.75 and a line of 0.8, braking with 0.6 of its grip and
+driving with 0.48, laps exactly like one with a grip of 2.19 and a line
+of 1 (the map as it is), braking with 0.48 and driving with 0.38. The
+laps pin down three things: grip over line (the corners), grip times
+brake_fraction, and grip times drive_fraction. Four numbers cannot be
+had from three. So mu is held at 1.75 at its reference load, which
+agrees with the hardest braking seen on the real laps, and line takes
+up the rest. Since the map already follows a racing line, the second
+car is probably nearer the truth: more cornering grip than 1.75 and a
+line near 1. The laps, and what a setup change is worth, come out
+exactly the same either way.
 
 A brake_fraction of 0.6 does not mean weak brakes. The model brakes at
-the limit all the way into every corner. A real driver is at the limit
-for a moment and well inside it for most of each braking zone, and the
-fitted share is the average.
+one steady share of the grip all the way into every corner. A real
+driver brakes late and hard, then eases off, and the fitted share is
+the average. So the simulated car starts braking too early: on three
+real races it was on the brakes for 4 to 5% of the lap where the real
+car was not yet slowing hard.
 
-One line number for a whole circuit is a simplification: a real line
-straightens a chicane far more than a long corner. Building the line a
-car could really take, the smoothest one within a couple of metres of
-the map, fitted four real laps 8 to 50% better again. But the laps did
-not say how wide to make it (1.5m was best at Monza, 4m or more at
-Bahrain), and the downforce found swung with the width. It is not in
-this file.
+Where the fit is still out. On three real races (Monza and Spa 2020,
+Bahrain 2022) the simulated speed is about 10 km/h from the real one,
+rms. Split by what limits the simulated car at each point: the 83% of
+the lap where it is the engine holds 64% of the squared error, the 13%
+under braking holds 25%, and the 4% at the cornering limit holds 11%.
+About half of it all lies in the last 200m before the braking points,
+where the simulated car is 4 to 8 km/h too fast. It gains about half a
+second a lap on the straights and loses it again elsewhere. At the
+cornering limit it is 3 to 9 km/h too slow on average and 16 to 18 km/h
+out rms: too slow at some corners, too fast at others.
+
+One line number for a whole circuit is a simplification, and those
+corner speeds show it. Two ways of doing better through the geometry
+have been tried, and neither is in this file. The smoothest line within
+a couple of metres of the map fitted four real laps 8 to 50% better,
+but the laps did not say how wide to make it (1.5m was best at Monza,
+4m or more at Bahrain), and the downforce found swung with the width. A
+racing line worked out from real track edges fitted no better than the
+map (see GEOMETRY). Why the corners differ is not yet known.
 
 STEPPING
 
@@ -992,13 +1029,16 @@ CIRCUIT_BOUNDS = {
 def straightened(track, line):
     """The same track with every bend scaled by `line`.
 
-    The map the positions come from bends more than the line a car
-    really drives (see GEOMETRY in the notes at the top of this file).
-    line is the driven line's curvature as a fraction of the map's: 1 is
-    the map itself, 0.8 a line that bends 0.8 times as much everywhere.
+    line is a factor on the map's curvature: 1 is the map itself, 0.8 a
+    track that bends 0.8 times as much everywhere. The real laps ask for
+    about 0.8. That was first read as the car driving a straighter line
+    than the map. But the map already follows a racing line, so most of
+    it is something else, probably more cornering grip than the tyre
+    figure allows (see GEOMETRY and FITTING in the notes at the top of
+    this file).
 
-    One number for a whole circuit is a simplification. A real line
-    straightens a short kink far more than a long hairpin.
+    One number for a whole circuit is a simplification. On real laps
+    the corners do not all ask for the same.
     """
     return replace(track, curvature=track.curvature * line)
 
@@ -1016,15 +1056,16 @@ def fit_multi(references, base_car,
         power. They belong to the car and its driver.
       - cla and cda are fitted per circuit, because teams genuinely run
         different wing levels.
-      - line is fitted per circuit: how much straighter the driven line
-        is than the map (see straightened()). Every circuit has its own
-        map.
+      - line is fitted per circuit: the factor on the map's curvature
+        that the laps ask for (see straightened()). Every circuit has
+        its own map.
 
     Why the grip is held. Grip, line and the two shares cannot all four
     be fitted: the laps pin down only three things about them (see
-    FITTING in the notes at the top of this file). Holding the grip at a
-    believable figure for the tyre leaves the other three meaning what
-    their names say.
+    FITTING in the notes at the top of this file). So the grip is held
+    at a believable figure for the tyre. If the real figure is higher,
+    line comes out lower and both shares higher by the same factor, and
+    every lap stays the same.
 
     Solved as a least-squares problem on lap_residuals(), with a
     trust-region method. The choice matters. A general-purpose minimiser
@@ -1041,8 +1082,8 @@ def fit_multi(references, base_car,
     at an assumed value than fitted.
 
     Returns (shared_values, per_circuit_cars, tracks, outcome). tracks
-    are the references' tracks as the fit says they were driven: the
-    same geometry with line applied. Simulate on those.
+    are the references' tracks with each circuit's line applied.
+    Simulate on those.
     """
     n = len(references)
 
@@ -1132,8 +1173,8 @@ def fit_multi(references, base_car,
 
     # The same fit again from somewhere very different: the shared
     # numbers near the top of their range, little downforce and a much
-    # straighter line. Agreement shows the answer comes from the data
-    # and not from where the search began.
+    # lower line. Agreement shows the answer comes from the data and
+    # not from where the search began.
     span = upper - lower
     far = lower + 0.2 * span
     far[:len(shared)] = (lower + 0.8 * span)[:len(shared)]
@@ -1177,8 +1218,8 @@ def fit_multi(references, base_car,
         for name, value in shared_values.items():
             print(f"    {name}: {getattr(base_car, name):.3f} "
                   f"-> {value:.3f}{at_bound(value, SHARED_BOUNDS[name])}")
-        print("\n  Per circuit (aero, and line: how much of the map's "
-              "curvature the car really drives):")
+        print("\n  Per circuit (aero, and line: the factor on the map's "
+              "curvature that the laps ask for):")
         cursor = len(shared)
         for reference in references:
             own = outcome.x[cursor:cursor + len(per_circuit)]
@@ -1763,14 +1804,22 @@ def setup_effects(track, car, changes=SETUP_CHANGES):
     a wing is roughly the downforce line plus the drag line, each scaled
     to what the wing really gives.
 
-    How far to trust them. Tested on 51 made-up sessions with a known
-    car, each fitted from data with the faults real data has: these
-    figures came out 4% from the truth on average. In the worst session
-    (a driven line straighter than the map by a different amount at
-    every corner) they averaged 14% out, with one figure 26% out. On
-    real fitted circuits there is one check from outside: teams reckon
-    10kg of fuel costs about 0.3s a lap, and this gives 0.23s at Monza,
-    0.22s at Bahrain and 0.31s at Spa.
+    How far to trust them. Tested on 80 made-up sessions with a known
+    car, each fitted from data with the faults real data has. What
+    matters most is whether the corners all ask for the same line
+    number (see FITTING in the notes at the top of this file).
+      - Where they did (54 sessions), every figure was within 10% of
+        the truth nine times in ten.
+      - Where each corner asked for its own (26 sessions), as on real
+        laps, the drag, power and grip figures were within 9, 10 and
+        13% nine times in ten. The downforce figure was typically 14%
+        out and 46% at worst. The mass figure was typically 10% out and
+        26% at worst.
+    So on real circuits trust the drag and power figures most, and
+    treat the downforce and mass figures as rough. There is one check
+    from outside: teams reckon 10kg of fuel costs about 0.3s a lap, and
+    on real fitted circuits this gives 0.23s at Monza, 0.22s at Bahrain
+    and 0.31s at Spa.
 
     Returns a dict of {what the change is called: seconds}.
     """
@@ -1865,8 +1914,7 @@ if __name__ == '__main__':
     print("\nFitting...")
     shared_values, cars, tracks, outcome = fit_multi(references, F1_2024)
 
-    # tracks are the references' tracks as the fit says they were
-    # driven: the map's geometry with each circuit's line applied
+    # tracks are the references' tracks with each circuit's line applied
     results = [simulate(track, car) for track, car in zip(tracks, cars)]
 
     print("\nPer-circuit results (against the real lap along the same "
@@ -1899,8 +1947,9 @@ if __name__ == '__main__':
         print(f"  {reference.track.name}:")
         for label, seconds in setup_effects(track, car).items():
             print(f"    {label:20s} {seconds:+.2f}s")
-    print("  Treat these as good to about 15%. See setup_effects() for "
-          "how that was tested.")
+    print("  Drag and power: good to about 10%. Tyre grip: about 15%. "
+          "Downforce and mass are\n  rough: typically 10 to 15% out, "
+          "sometimes 30%. See setup_effects() for the tests.")
 
     fig, axes = plt.subplots(len(references), 1, squeeze=False,
                              figsize=(13, 3 * len(references)))
