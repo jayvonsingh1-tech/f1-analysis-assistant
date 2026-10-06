@@ -15,12 +15,11 @@ FastF1 records them, and compares what build_reference() makes of them
 with the truth. It needs pandas, which FastF1 needs too.
 
 The checks were themselves checked: the simulator was broken on
-purpose, one place at a time, to see whether a line here says BAD. For
-sections 1 to 12 that was 69 places, and every one was caught. For the
-part that reads FastF1's data it was about 100 places. About a dozen of
-those change nothing that can be measured on the made-up race (each is
-a second safeguard behind a first one, or a refinement too small to
-see), and the rest were caught.
+purpose in 170 different places, one at a time, to see whether a line
+here says BAD. 158 of the breaks were caught. The other 12 are all in
+the part that reads FastF1's data, and change nothing that can be
+measured on the made-up race: each is a second safeguard behind a first
+one, or a refinement too small to see.
 
 The last section runs the simulator at the size of a Formula Student
 car and its events, to show the physics holds there too.
