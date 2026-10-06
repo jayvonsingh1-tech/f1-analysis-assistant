@@ -10,7 +10,7 @@ the change broke something that used to work. The last line says ALL OK,
 or how many checks failed.
 
 The checks were themselves checked: the simulator was broken on purpose
-in 32 different places, one at a time, and every break made at least
+in 54 different places, one at a time, and every break made at least
 one line here say BAD.
 
 The last section runs the simulator at the size of a Formula Student
@@ -537,7 +537,188 @@ check("and its table is the same, but for 10kg being a smaller share of it",
       f"{worth['10kg lighter']:+.3f}s")
 
 # ---------------------------------------------------------------------------
-print("11. At the size of a Formula Student car")
+print("11. Hills")
+# ---------------------------------------------------------------------------
+
+def hill(slope, length=3000.0):
+    """A straight on one steady slope: 0.05 climbs 1m in every 20."""
+    distance = np.arange(0, length, 1.0)
+    return sim.Track(name='hill', distance=distance,
+                     curvature=np.zeros_like(distance), source='made up',
+                     slope=np.full_like(distance, slope))
+
+level = sim.simulate(straight(3000.0), car, initial_speed=40.0)
+check("a slope of nothing is a flat track",
+      np.array_equal(sim.simulate(hill(0.0), car, initial_speed=40.0).speed,
+                     level.speed))
+
+# With next to no power and no drag a car is a ball on a slope: it
+# gains or loses speed only by the height it drops or climbs.
+# v^2 = v0^2 - 2 g h
+ball = sim.replace(NO_WINGS, power=1e-3, cda=1e-12)
+for slope, way in ((-0.08, "down"), (0.03, "up")):
+    run = sim.simulate(hill(slope, 500.0), ball, initial_speed=30.0)
+    exact = math.sqrt(30.0 ** 2 - 2 * GRAVITY * slope * 499.0)
+    close(f"coasting {way} a slope of {abs(slope):.0%} for 499m (m/s)",
+          run.speed[-1], exact, 1e-6)
+
+# The same on a slope that changes: flat for 100m, then a climb that
+# is 1 in 10 from the next point on. At every point the ball's speed
+# has to match the height it has climbed so far.
+slope = np.where(np.arange(300) < 100, 0.0, 0.1)
+climbed = np.concatenate([[0.0], np.cumsum(0.5 * (slope[1:] + slope[:-1]))])
+run = sim.simulate(sim.replace(hill(0.0, 300.0), slope=slope), ball,
+                   initial_speed=30.0)
+worst = float(np.abs(run.speed ** 2
+                     - (30.0 ** 2 - 2 * GRAVITY * climbed)).max())
+check("where the slope changes, its speed follows the height point by "
+      "point", worst < 1e-3, f"speed squared within {worst:.1e}")
+
+# Top speed is where the power is all used: on drag, and on lifting the
+# car up the hill (or with the hill's help, going down)
+for slope in (0.05, -0.05, 0.15):
+    top = sim._terminal_speed(car, slope)
+    used = (car.drag(top) + car.mass * GRAVITY * slope) * top
+    close(f"top speed on a slope of {slope:+.0%}: power used over power",
+          used / car.power, 1.0, 1e-9)
+    run = sim.simulate(hill(slope, 8000.0), car, initial_speed=40.0)
+    close("and the car reaches it after 8km (m/s)", run.speed[-1], top, 0.05)
+run = sim.simulate(hill(-0.05, 8000.0), car, initial_speed=40.0)
+check("downhill it goes faster than its top speed on the level",
+      run.speed[-1] > sim._terminal_speed(car) + 1.0,
+      f"{run.speed[-1] * 3.6:.0f} against "
+      f"{sim._terminal_speed(car) * 3.6:.0f} km/h")
+
+# Braking for the corner of section 2, on a hill. No wings and next to
+# no drag, so the car slows at mu g, plus g x the slope going up and
+# less g x the slope going down.
+for slope, way in ((0.06, "uphill"), (-0.06, "downhill")):
+    on_a_hill = sim.replace(to_a_corner, slope=np.full(600, slope))
+    run = sim.simulate(on_a_hill, stopper, initial_speed=90.0)
+    braking = np.flatnonzero(run.limit == 'brake')
+    a, b = braking[5], braking[-10]
+    lost = (run.speed[a] ** 2 - run.speed[b] ** 2) / (2.0 * (b - a))
+    close(f"braking {way}, deceleration (m/s2)", lost,
+          (1.5 + slope) * GRAVITY, 0.02)
+
+# Braking again, on a road that is flat and then climbs 1 in 10 from
+# 400m on, part-way through the braking zone. Each metre of braking
+# takes off mu g plus g x the slope half-way along that metre.
+slope = np.where(np.arange(600) < 400, 0.0, 0.1)
+run = sim.simulate(sim.replace(to_a_corner, slope=slope), stopper,
+                   initial_speed=90.0)
+braking = np.flatnonzero(run.limit == 'brake')[5:-10]
+lost = (run.speed[braking] ** 2 - run.speed[braking + 1] ** 2) / 2.0
+should = (1.5 + 0.5 * (slope[braking] + slope[braking + 1])) * GRAVITY
+worst = float(np.abs(lost - should).max())
+check("braking across a change of slope, metre by metre",
+      braking[0] < 390 and braking[-1] > 410 and worst < 0.02,
+      f"within {worst:.3f} m/s2 on every metre")
+
+# The loop of section 4, now climbing 80m and coming back down. Three
+# laps in a row again: the middle one is a true flying lap.
+height = 40.0 * np.sin(2 * math.pi * np.arange(3000) / 3000.0)
+hilly = sim.replace(loop, slope=np.gradient(height))
+flying = sim.simulate(hilly, car, periodic=True)
+three = sim.Track(name='three hilly laps', distance=np.arange(0, 9000.0, 1.0),
+                  curvature=np.tile(hilly.curvature, 3), source='made up',
+                  slope=np.tile(hilly.slope, 3))
+middle = sim.simulate(three, car, initial_speed=50.0).speed[3000:6000]
+close("a hilly flying lap against the middle lap of three (s)",
+      flying.lap_time, float(np.sum(1.0 / middle)), 0.01)
+on_the_flat = sim.simulate(loop, car, periodic=True)
+moved = float(np.abs(flying.speed - on_the_flat.speed).max())
+check("and the hills change its speed", moved > 1.0,
+      f"by up to {moved * 3.6:.1f} km/h, and the lap by "
+      f"{flying.lap_time - on_the_flat.lap_time:+.3f}s")
+
+# That loop is braking as it crosses the line. This one crosses it flat
+# out on the steepest part of the climb, so the one step that joins the
+# end of the lap to its start is on a slope too.
+curvature = np.zeros(3000)
+curvature[1000:1050] = 1 / 20.0
+curvature[2200:2400] = 1 / 80.0
+climbing = sim.Track(name='line on a climb', distance=np.arange(0, 3000.0),
+                     curvature=curvature, source='made up',
+                     slope=np.gradient(height))
+flying = sim.simulate(climbing, car, periodic=True)
+three = sim.Track(name='three laps', distance=np.arange(0, 9000.0, 1.0),
+                  curvature=np.tile(curvature, 3), source='made up',
+                  slope=np.tile(climbing.slope, 3))
+middle = sim.simulate(three, car, initial_speed=50.0).speed[3000:6000]
+worst = float(np.abs(flying.speed - middle)[:500].max())
+check("crossing the line on a climb, the first 500m match that middle lap",
+      worst < 0.002, f"within {worst:.5f} m/s")
+
+message = refused(lambda: sim.Track(name='bad', distance=[0, 1, 2],
+                                    curvature=[0, 0, 0], source='made up',
+                                    slope=[0.0, 0.1]))
+check("a track with a slope for only some of its points",
+      message is not None, message or "")
+
+# Heights in the position data become the slope. A made-up circuit: a
+# circle 2km round that rises and falls 10m either side of its middle
+# height, twice a lap. Six laps of positions as FastF1 gives them: a
+# sample every 15m or so, in tenths of a metre, each lap sampled at
+# different places.
+round_trip = 2000.0
+def on_circle(along):
+    angle = 2 * math.pi * along / round_trip
+    radius = round_trip / (2 * math.pi)
+    return (radius * np.cos(angle), radius * np.sin(angle),
+            10.0 * np.sin(2 * angle))
+
+positions = []
+for lap_number in range(6):
+    along = np.arange(2.5 * lap_number, round_trip, 15.0)
+    positions.append(tuple(np.round(10 * np.asarray(values))
+                           for values in on_circle(along)))
+along = np.arange(0.0, round_trip, 12.0)
+x, y, _ = on_circle(along)
+speed_line = (10 * x, 10 * y, np.full(len(along), 200.0))
+built = sim.track_from_laps(positions, speed_line=speed_line)
+true_slope = (10.0 * 4 * math.pi / round_trip
+              * np.cos(4 * math.pi * built.distance / round_trip))
+worst = float(np.abs(built.slope - true_slope)[50:-50].max())
+check("heights in the position data: the slope comes out right",
+      worst < 0.004, f"within {worst:.2%}, on slopes of up to "
+      f"{np.abs(true_slope).max():.1%}")
+close("and the height from lowest to highest (m)",
+      np.ptp(built.channels['z']), 20.0, 0.2)
+without = sim.track_from_laps([lap[:2] for lap in positions],
+                              speed_line=speed_line)
+check("no heights in the position data: a flat track",
+      not without.slope.any() and 'z' not in without.channels)
+some = sim.track_from_laps(positions[:5] + [positions[5][:2]],
+                           speed_line=speed_line)
+check("heights on some laps and not others: a flat track too",
+      not some.slope.any() and 'z' not in some.channels)
+
+# Heights that cannot be right are not believed
+same, said = sim._hills(built)
+check("believable heights are kept, and described",
+      same is built and said.startswith('20m from the lowest'), said)
+flat, said = sim._hills(without)
+check("no heights: said so", 'no heights' in said, said)
+level = sim.replace(built, slope=np.zeros(len(built.distance)),
+                    channels=dict(built.channels,
+                                  z=np.full(len(built.distance), 85.2)))
+flat, said = sim._hills(level)
+check("heights that are all the same: a flat track, said so",
+      flat is level and 'a flat track' in said, said)
+steep = sim.replace(built, slope=built.slope * 5)
+flat, said = sim._hills(steep)
+check("a slope steeper than 1 in 4 is not believed",
+      not flat.slope.any() and 'cannot be right' in said, said)
+channels = dict(built.channels, z=built.channels['z']
+                + np.linspace(0.0, 20.0, len(built.distance)))
+broken = sim.replace(built, channels=channels)
+flat, said = sim._hills(broken)
+check("nor a lap that ends 20m higher than it began",
+      not flat.slope.any() and 'cannot be right' in said, said)
+
+# ---------------------------------------------------------------------------
+print("12. At the size of a Formula Student car")
 # ---------------------------------------------------------------------------
 
 # Something like a Formula Student car: 280kg with its driver, 60kW at

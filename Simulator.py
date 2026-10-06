@@ -15,7 +15,7 @@ MODEL ASSUMPTIONS AND LIMITATIONS
 
 This is a point mass with three refinements: load-sensitive tyres, a
 driven-axle limit on acceleration, and a tractive force cap at low speed.
-Not modelled:
+It runs on a track with hills (see HILLS). Not modelled:
   - explicit weight transfer between individual wheels
   - aerodynamic balance shifting with ride height
   - a torque curve and gear ratios; power is a single figure
@@ -23,7 +23,8 @@ Not modelled:
     uses yet; build_reference() fits a lap driven with DRS shut where
     there is one, and warns where there is not)
   - tyre temperature, wear, camber and track surface
-  - elevation change, banking and kerbs
+  - banking and kerbs, and what crests and dips do to the load on the
+    tyres (the slope itself is in: see HILLS)
   - the tyres' rolling resistance, and the wind (FastF1 records the
     wind with the rest of the weather, and nothing here uses it yet)
 
@@ -197,14 +198,15 @@ Where the fit is still out. On three real races (Monza and Spa 2020,
 Bahrain 2022, fitted with a power for each because the seasons differ)
 the simulated speed is 7 to 10 km/h from the real one, rms. Split by
 what limits the simulated car at each point: the 83% of the lap where
-it is the engine holds 59% of the squared error, the 13% under braking
-holds 28%, and the 4% at the cornering limit holds 13%. Nearly half of
-it all lies in the last 200m before the braking points, where the
-simulated car is about 4 km/h too fast. At Monza and Spa it starts the
-long straights 4 to 10 km/h too slow, and at all three it arrives 6 to
-10 km/h too fast. At the cornering limit it is 1 to 8 km/h too slow on
-average and 16 to 17 km/h out rms: too slow at some corners, too fast
-at others.
+it is the engine holds 57% of the squared error, the 13% under braking
+holds 29%, and the 4% at the cornering limit holds 13%. Half of it all
+lies in the last 200m before the braking points, where the simulated
+car is about 4 km/h too fast. At Monza and Spa it starts the long
+straights 4 to 6 km/h too slow, and at all three it arrives 5 to 11
+km/h too fast. That is the battery running low, which the model does
+not have (see WEIGHT, AIR AND POWER). At the cornering limit it is 1 to
+8 km/h too slow on average and 16 to 17 km/h out rms: too slow at some
+corners, too fast at others.
 
 One line number for a whole circuit is a simplification, and those
 corner speeds show it. Two ways of doing better through the geometry
@@ -250,15 +252,29 @@ kilogram. Real laps ask for less: 640 to 850W on four races from 2020
 to 2022. With only the weight put right the fit got worse, because the
 lighter car had still more power for each kilogram. So fit_multi() now
 fits the power, one figure for all the circuits fitted together. On
-Monza and Spa in 2020 (one car, a week apart) it comes out at 592kW,
-and the drag number falls from 1.55 to 1.29 at Monza and from 1.86 to
-1.54 at Spa.
+Monza and Spa in 2020 (one car, a week apart) it comes out at 569kW,
+and the drag number at 1.23 at Monza and 1.44 at Spa, where it had
+been 1.55 and 1.86.
 
 That power is not the engine's rating, which for an F1 car is about
 750kW. It is what reaches the road on average while the car is flat
 out, after everything the model leaves out: losses on the way to the
 wheels, the tyres' rolling resistance, gear changes, and the battery
 running low before the end of a long straight.
+
+The battery is the big one, and it can be seen in the data. Part of an
+F1 car's power is electric, the battery cannot supply it for a whole
+lap, and so the car goes without it towards the end of the straights.
+Measured on 37 real laps from the four races, at full throttle in a
+straight line: with more than 5s to go before the driver lifts, the
+car gains speed as its power and drag say it should. With 3 to 4s to go
+it is 4% of its power short, with 2s to go 14%, and in the last second
+25%. On the main straight at Monza Hamilton's speed fell from 333 to
+323 km/h over his last four seconds at full throttle. How much and how
+early differs from straight to straight and car to car. The model has
+one power figure all the way, so the simulated car is too slow early
+in a long straight and too fast at the end of it (see Where the fit is
+still out, under FITTING).
 
 One power for every circuit suits laps from one season. For laps from
 different seasons the fit can find a power for each circuit instead
@@ -267,11 +283,11 @@ depends on how well that circuit's corners are matched, because the
 fit moves the power to make up for corners it has wrong. With the
 Monza and Spa laps placed on the middle of the road, where every
 corner is wrong, the fit asked for 746kW. Two checks:
-  - On 16 real laps (eight drivers at Monza and at Spa in 2020, each
-    fitted on his own two laps) the four cars with Mercedes engines
-    came out within 1.3% of their average at Monza and 3.1% at Spa.
-    The same driver's car came out 2% stronger at Spa than at Monza on
-    average, give or take 4%.
+  - On 16 real laps (eight drivers at Monza and at Spa in 2020), with
+    each circuit fitted on its own, the four cars with Mercedes engines
+    came out within 1.8% of their average at Monza and 1.9% at Spa.
+    Every car came out weaker at Spa than at Monza, by 2 to 8% and 6%
+    on average (see HILLS for why).
   - On made-up laps where every corner asked for its own line, as real
     corners do, a power fitted for one circuit alone was typically 5%
     out and 18% out one time in ten, and the drag went with it. One
@@ -287,6 +303,57 @@ of the straights. With too much power the two happened to cancel. The
 fit matches the speed at every point and takes little notice of the lap
 time, and the speeds are now closer (see Where the fit is still out,
 under FITTING).
+
+HILLS
+
+A circuit is not flat, and on a slope part of the car's weight pulls it
+back down the hill. On a climb of 1 in 20 that is 390N for an F1 car, a
+tenth of its drag at 250 km/h, and on the way down the car gets the same
+back. It moves the base car's top speed by 6 km/h either way. Spa
+climbs 16% through Raidillon, and both of its long straights are
+uphill.
+
+FastF1's position data has heights as well as X and Y, and they are
+good. Checked on four real races: every lap puts the same height at the
+same place to within about 10cm, and the totals are right. From its
+lowest point to its highest, Spa comes out at 102m, Bahrain 17m, Monza
+12m and Jeddah 2m. track_from_laps() fits a spline through the heights
+as it does through X and Y, the slope is how fast the height changes
+along the lap, and simulate() adds the weight's pull along the road to
+the forces on the car, gaining speed and slowing. Heights that cannot
+be right are thrown away and the track taken as flat (see _hills). A
+Track made without a slope is flat, as every track was before.
+
+Tested on made-up laps with a known car, built from positions with
+heights in them as real laps are. On circuits that climb and drop 100m,
+told the hills, the fit found the power to within 1% and the drag to
+within 2%, as well as it does on the flat. Not told, it had the power
+up to 5% out and the drag up to 11%. With 20m of hills it made no
+difference. (That is with every corner alike. Where each corner asked
+for its own line, as real ones do, that was the bigger error, with the
+hills or without.)
+
+On the real laps the hills matter at Spa and nowhere else of the four.
+At Monza, Bahrain and Jeddah the fitted numbers move by 2% or less.
+Fitted on its own, Spa's power falls from 590 to 540kW and its drag
+number from 1.54 to 1.36, and its squared error falls by 4%. The car
+had looked draggier than it is, because it reaches its top speed going
+uphill.
+
+That shows up something the flat track had been hiding. Fitted one
+circuit at a time, the same car now comes out weaker at Spa than at
+Monza, a week apart: by 7% for each of the four Mercedes-engined cars
+(give or take 1%), and by 4% on average for four others. The hills are
+not the cause. The battery is (see WEIGHT, AIR AND POWER): Spa's two
+long straights outlast it, so the car's power averaged over its
+flat-out running really is lower there. On the flat track the two
+errors happened to cancel.
+
+Not in the model: crests and dips. Through the dip at the foot of
+Raidillon the road pushes up on the car and its tyres have more load
+and more grip, and over the crest at the top they have less. And the
+distance along a Track is measured on the map, so on a slope the road
+itself is a little longer: 1.3% on a 16% climb.
 
 STEPPING
 
@@ -318,7 +385,9 @@ hairpin of 4.5m radius is 0.06s out at 1m and right at 0.25m. And from
 a standing start the speeds are right but lap_time is not. It is the
 sum for a lap already at speed, and from rest the time has to be added
 up step by step, each step at the average of the speeds at its two ends
-(the checks do it that way, and get the exact 75m time).
+(the checks do it that way, and get the exact 75m time). A Track made
+by hand can be given a slope at each of its points, so a course on a
+hill can be run as it is.
 
 SPEED
 
@@ -494,15 +563,21 @@ class Track:
     none.
 
     distance is in metres and has to be evenly spaced, because
-    simulate() steps along it one spacing at a time. curvature is 1 /
-    radius in 1/m. Left and right turns count the same, so its sign is
-    dropped.
+    simulate() steps along it one spacing at a time. It is measured on
+    the map, so on a hill the road itself is a little longer. curvature
+    is 1 / radius in 1/m. Left and right turns count the same, so its
+    sign is dropped.
+
+    slope is how steeply the track climbs at each point: metres of
+    height gained for each metre of distance, so 0.1 is a climb of 1 in
+    10 and -0.1 a drop of 1 in 10. Left out, the track is flat.
     """
     name: str
     distance: np.ndarray
     curvature: np.ndarray
     source: str
     channels: dict = field(default_factory=dict)
+    slope: np.ndarray = None
 
     def __post_init__(self):
         # Plain arrays of numbers, whatever was handed over (a list, a
@@ -514,6 +589,12 @@ class Track:
         if points < 2 or points != len(self.curvature):
             raise ValueError("A Track needs a distance and a curvature for "
                              "each of its points, and at least two points.")
+        if self.slope is None:
+            self.slope = np.zeros(points)
+        self.slope = np.asarray(self.slope, dtype=float)
+        if len(self.slope) != points:
+            raise ValueError("A Track's slope needs a value for each of "
+                             "its points.")
         spacing = np.diff(self.distance)
         if spacing[0] <= 0 or not np.allclose(spacing, spacing[0],
                                               rtol=1e-6, atol=1e-9):
@@ -671,6 +752,8 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
       5. Leave out the bins that lie sharply off the fitted line (map
          faults), and fit again
       6. Differentiate the spline for curvature
+      7. Where the laps carry heights too, fit a spline through those
+         the same way, and differentiate it for the slope
 
     Why the clock and not distance. Curvature is a second derivative, so
     it magnifies every small error, and how much that matters depends on
@@ -688,9 +771,10 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     irons out anything shorter than about 2 pi (lam / density)^(1/4).
     Turned round, that gives the stiffness for a chosen cut-off.
 
-    positions: list of (x, y) raw position arrays, one per lap. Every
-        other lap is lined up against the first, so put a lap with no
-        holes in its data there.
+    positions: list of (x, y) raw position arrays, one per lap, or of
+        (x, y, z) where there are heights. Every other lap is lined up
+        against the first, so put a lap with no holes in its data
+        there.
     lam: stiffness of the spline. None works it out from `cutoff`.
     max_offset: metres. Samples further than this from the reference line
         are dropped, which removes off-track moments.
@@ -704,8 +788,8 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
         treated as faults in the map and left out. None keeps them all.
 
     The track's channels hold x and y, the fitted line itself in metres
-    at each point of track.distance, and speed_kph when speed_line is
-    given.
+    at each point of track.distance, speed_kph when speed_line is
+    given, and z, the height in metres, when the laps carry heights.
     """
     # 1. Reference line from the first lap, plus its unit tangent
     ref_s, ref_x, ref_y = _resample_line(
@@ -760,12 +844,17 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
             * (ref_clock[-1] - ref_clock[-2]) / (ref_s[-1] - ref_s[-2]))
         return reading
 
-    pooled_s, pooled_x, pooled_y = [], [], []
-    for lap_x, lap_y in positions:
-        lap_x = np.asarray(lap_x, dtype=float) * scale
-        lap_y = np.asarray(lap_y, dtype=float) * scale
-        known = np.isfinite(lap_x) & np.isfinite(lap_y)
-        lap_x, lap_y = lap_x[known], lap_y[known]
+    # Heights are used only if every lap has them
+    with_heights = all(len(lap) > 2 for lap in positions)
+
+    pooled_s, pooled_x, pooled_y, pooled_z = [], [], [], []
+    for lap in positions:
+        lap_x = np.asarray(lap[0], dtype=float) * scale
+        lap_y = np.asarray(lap[1], dtype=float) * scale
+        lap_z = (np.asarray(lap[2], dtype=float) * scale if with_heights
+                 else np.zeros_like(lap_x))
+        known = np.isfinite(lap_x) & np.isfinite(lap_y) & np.isfinite(lap_z)
+        lap_x, lap_y, lap_z = lap_x[known], lap_y[known], lap_z[known]
         offset, index = ref_tree.query(np.column_stack([lap_x, lap_y]))
 
         near = offset < max_offset
@@ -780,10 +869,12 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
         pooled_s.append(ref_s[idx] + along)
         pooled_x.append(px)
         pooled_y.append(py)
+        pooled_z.append(lap_z[near])
 
     s = np.concatenate(pooled_s)
     x = np.concatenate(pooled_x)
     y = np.concatenate(pooled_y)
+    z = np.concatenate(pooled_z)
 
     # 3. Average into bins along the track, weighted by sample count.
     # The smoothing spline puts a knot at every data point, so samples
@@ -797,6 +888,7 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     clock = clock_at(centre)
     bin_x = np.bincount(bins, weights=x)[occupied] / counts[occupied]
     bin_y = np.bincount(bins, weights=y)[occupied] / counts[occupied]
+    bin_z = np.bincount(bins, weights=z)[occupied] / counts[occupied]
     weight = counts[occupied].astype(float)
 
     # 4. How stiff to make the spline
@@ -865,6 +957,16 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     # placed along it later
     channels = {'x': np.interp(distance, arc, fx),
                 'y': np.interp(distance, arc, fy)}
+
+    # 7. Heights the same way: a spline against the clock, then the
+    # slope is how fast the height changes along the line
+    slope = None
+    if with_heights:
+        spline_z = make_smoothing_spline(clock[keep], bin_z[keep],
+                                         w=weight[keep], lam=stiffness)
+        fz = spline_z(fine)
+        slope = np.interp(distance, arc, np.gradient(fz, arc))
+        channels['z'] = np.interp(distance, arc, fz)
     if speed_line is not None:
         fitted_tree = cKDTree(np.column_stack([fx, fy]))
         _, index = fitted_tree.query(np.column_stack([line_x, line_y]))
@@ -889,15 +991,37 @@ def track_from_laps(positions, name="unknown", spacing=1.0, lam=None,
     return Track(name=name, distance=distance, curvature=curvature,
                  source=f"pooled from {len(positions)} laps, {smoothing}, "
                         f"{faults}",
-                 channels=channels)
+                 channels=channels, slope=slope)
 
 # ---------------------------------------------------------------------------
 # Physics
 # ---------------------------------------------------------------------------
 
-def _terminal_speed(car):
-    """Top speed, where all the power goes into beating drag."""
-    return (car.power / (0.5 * car.air_density * car.cda)) ** (1 / 3)
+def _terminal_speed(car, slope=0.0):
+    """Top speed, where all the power goes into beating drag.
+
+    On a slope the car's weight takes some of the power (uphill) or
+    adds to it (downhill, where slope is negative).
+    """
+    drag_factor = 0.5 * car.air_density * car.cda
+    on_the_level = (car.power / drag_factor) ** (1 / 3)
+    if slope == 0.0:
+        return on_the_level
+
+    # There is no neat formula on a hill, so the answer is found by
+    # halving, as cornering_limit() finds its own. It lies between
+    # standstill and a speed at which half the drag would use all the
+    # power and the other half all the hill can give back.
+    hill = car.mass * GRAVITY * slope
+    low = 0.0
+    high = max(1.26 * on_the_level, math.sqrt(2 * abs(hill) / drag_factor))
+    for _ in range(60):
+        middle = 0.5 * (low + high)
+        if (drag_factor * middle ** 2 + hill) * middle < car.power:
+            low = middle
+        else:
+            high = middle
+    return 0.5 * (low + high)
 
 def _time_along(step, speed):
     """Seconds taken to cover a line, given the speed in m/s at each of
@@ -920,11 +1044,13 @@ def cornering_limit(track, car, halvings=30):
     of a metre per second.
 
     Where the car could corner faster than it can ever go, the answer
-    is its top speed.
+    is its top speed: the one it would reach down the steepest drop on
+    the track.
     """
     curvature = track.curvature
     low = np.zeros_like(curvature)
-    high = np.full_like(curvature, _terminal_speed(car))
+    steepest_drop = min(float(track.slope.min()), 0.0)
+    high = np.full_like(curvature, _terminal_speed(car, steepest_drop))
 
     for _ in range(halvings):
         middle = 0.5 * (low + high)
@@ -934,11 +1060,13 @@ def cornering_limit(track, car, halvings=30):
 
     return 0.5 * (low + high)
 
-def available_longitudinal(car, speed, curvature, braking=False):
+def available_longitudinal(car, speed, curvature, braking=False, slope=0.0):
     """Longitudinal acceleration available at one point, in m/s2.
 
     One grip budget shared between cornering and accelerating or braking,
-    via a friction ellipse.
+    via a friction ellipse. slope is how steeply the track climbs there
+    (see Track): on a climb the car's weight holds it back and helps it
+    slow, and on a drop the other way round.
 
     speed and curvature are single numbers, not arrays. simulate() calls
     this for every point of the lap in both directions, so it uses
@@ -952,6 +1080,8 @@ def available_longitudinal(car, speed, curvature, braking=False):
     remaining = math.sqrt(max(1.0 - used ** 2, 0.0))
 
     drag = car.drag(speed)
+    # The part of the car's weight that pulls it back down the hill
+    hill = car.mass * GRAVITY * slope
 
     if braking:
         # All four tyres brake, and drag helps. brake_fraction below 1
@@ -959,14 +1089,14 @@ def available_longitudinal(car, speed, curvature, braking=False):
         # for a driver who is not on the limit all the way.
         tyre_limit = grip * remaining * car.brake_fraction
         mechanical_limit = car.brake_limit * car.mass * GRAVITY
-        force = min(tyre_limit, mechanical_limit) + drag
+        force = min(tyre_limit, mechanical_limit) + drag + hill
         return force / car.mass
 
     # Only the driven axle puts power down. P/v is unbounded as speed
     # approaches zero, but real cars are torque-limited there, so cap it.
     traction_limit = grip * remaining * car.drive_fraction
     power_limit = min(car.power / max(speed, 1.0), car.max_tractive_force)
-    force = min(traction_limit, power_limit) - drag
+    force = min(traction_limit, power_limit) - drag - hill
     return force / car.mass
 
 def simulate(track, car, initial_speed=None, periodic=False):
@@ -1001,9 +1131,10 @@ def simulate(track, car, initial_speed=None, periodic=False):
     # the notes at the top of this file).
     corner_cap = corner_speed.tolist()
 
-    # Curvature half-way between each point and the next
+    # Curvature and slope half-way between each point and the next
     halfway_curvature = (0.5 * (track.curvature[1:]
                                 + track.curvature[:-1])).tolist()
+    halfway_slope = (0.5 * (track.slope[1:] + track.slope[:-1])).tolist()
 
     def accelerate(start):
         # Forwards from the first point, as hard as the car can go.
@@ -1021,7 +1152,8 @@ def simulate(track, car, initial_speed=None, periodic=False):
             previous = forward[i - 1] ** 2
             halfway = math.sqrt(max(previous + acceleration * step, 1.0))
             acceleration = available_longitudinal(
-                car, halfway, halfway_curvature[i - 1], braking=False)
+                car, halfway, halfway_curvature[i - 1], braking=False,
+                slope=halfway_slope[i - 1])
             squared = previous + 2 * acceleration * step
             forward[i] = min(math.sqrt(max(squared, 1.0)), corner_cap[i])
         return forward
@@ -1039,7 +1171,7 @@ def simulate(track, car, initial_speed=None, periodic=False):
             backward[-1] = corner_cap[-1]
         else:
             slowing = available_longitudinal(car, beyond, join_curvature,
-                                             braking=True)
+                                             braking=True, slope=join_slope)
             backward[-1] = min(math.sqrt(beyond ** 2 + 2 * slowing * step),
                                corner_cap[-1])
         deceleration = 0.0
@@ -1047,7 +1179,8 @@ def simulate(track, car, initial_speed=None, periodic=False):
             ahead = backward[i + 1] ** 2
             halfway = math.sqrt(max(ahead + deceleration * step, 1.0))
             deceleration = available_longitudinal(
-                car, halfway, halfway_curvature[i], braking=True)
+                car, halfway, halfway_curvature[i], braking=True,
+                slope=halfway_slope[i])
             squared = ahead + 2 * deceleration * step
             backward[i] = min(math.sqrt(max(squared, 1.0)), corner_cap[i])
         return backward
@@ -1063,11 +1196,12 @@ def simulate(track, car, initial_speed=None, periodic=False):
         # again with the end of the lap knowing that, then start the lap
         # one step on from the speed the car finishes at.
         join_curvature = 0.5 * (track.curvature[-1] + track.curvature[0])
+        join_slope = 0.5 * (track.slope[-1] + track.slope[0])
         most = backward[0]
         backward = brake(beyond=most)
         finish = min(forward[-1], backward[-1])
         gain = available_longitudinal(car, finish, join_curvature,
-                                      braking=False)
+                                      braking=False, slope=join_slope)
         start = math.sqrt(max(finish ** 2 + 2 * gain * step, 1.0))
         forward = accelerate(min(start, most))
 
@@ -1114,6 +1248,7 @@ class Reference:
     lap_choice: str = "lap"      # which lap this is, and why that one
     driver: str = ""             # whose lap it is, as a three-letter code
     eased: str = ""              # where the map was eased, if anywhere
+    hills: str = ""              # how far the lap climbs and drops
     mass: float = None           # kg the car weighed on this lap, if known
     air_density: float = None    # kg/m3 on the day, if known
     conditions: str = ""         # where those two numbers came from
@@ -1810,6 +1945,48 @@ def _air_for(lap):
     return density, (f"air {density:.3f} kg/m3 ({celsius:.0f}C, "
                      f"{millibar:.0f}mbar)")
 
+def _hills(track):
+    """Check a track's heights make sense, and say what they are.
+
+    track_from_laps() works out the slope from the heights in FastF1's
+    position data. On the four real races checked they are good: the
+    laps agree with each other to about 10cm, and Spa comes out
+    climbing and dropping 102m, as the real circuit does. But nothing
+    promises that for every session, so heights that cannot be right
+    are thrown away here and the track is taken as flat: a slope of
+    more than 1 in 4 (the steepest on any F1 circuit is under 1 in 5),
+    or a lap that does not end within 5m of the height it began at.
+
+    Returns the track, with its slope set to zero if the heights were
+    no good, and a sentence saying what was found.
+    """
+    if 'z' not in track.channels:
+        return track, ("no heights in the position data, so the track is "
+                       "taken as flat")
+    height, slope = track.channels['z'], track.slope
+    steepest = float(np.abs(slope).max())
+    apart = abs(float(height[-1] - height[0]))
+    wrong = ""
+    if not (np.isfinite(height).all() and np.isfinite(slope).all()):
+        wrong = "some are missing"
+    elif steepest > 0.25:
+        wrong = f"a slope of {steepest:.0%}"
+    elif apart > 5.0:
+        wrong = f"the lap ends {apart:.0f}m higher or lower than it began"
+    if wrong:
+        return (replace(track, slope=np.zeros(len(slope))),
+                f"the heights in the position data cannot be right "
+                f"({wrong}), so the track is taken as flat")
+    if height.max() - height.min() < 0.5:
+        return track, ("the heights in the position data are all the same "
+                       "to within half a metre: a flat track")
+    up, down = int(np.argmax(slope)), int(np.argmin(slope))
+    return track, (f"{height.max() - height.min():.0f}m from the lowest "
+                   f"point of the lap to the highest (steepest climb "
+                   f"{slope[up]:.1%} at {track.distance[up]:.0f}m, "
+                   f"steepest drop {-slope[down]:.1%} at "
+                   f"{track.distance[down]:.0f}m)")
+
 def build_reference(year, race, driver=None, spacing=1.0, lam=None,
                     max_laps=60, drag_limited=True,
                     most_g=MOST_LATERAL_G):
@@ -1825,6 +2002,10 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
     with DRS shut. Its clock is lined up with the position data's first
     (see _stream_offset), and each speed sample is then placed on the
     track by how far the car had travelled (see _speed_by_distance).
+
+    The position data has heights too, and the track's slope comes from
+    those (see track_from_laps and _hills). The reference's `hills`
+    says how far the lap climbs and drops.
 
     Last, kinks in the map are eased: short stretches where it asks for
     more than most_g of sideways acceleration at the speed the real car
@@ -1944,8 +2125,14 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
 
     density, air = _air_for(fastest)
 
+    def where(pos):
+        # A lap's positions as track_from_laps() takes them, with the
+        # heights if they were recorded
+        columns = ('X', 'Y', 'Z') if 'Z' in pos else ('X', 'Y')
+        return tuple(pos[column].to_numpy() for column in columns)
+
     pos_time = seconds(fastest_pos['SessionTime'])
-    positions = [(fastest_pos['X'].to_numpy(), fastest_pos['Y'].to_numpy())]
+    positions = [where(fastest_pos)]
     holes = [longest_gap(pos_time) > 1.0]
     own_offset = clock_offset(fastest, fastest_pos)
     offsets = [own_offset]
@@ -1955,7 +2142,7 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
             break
         if lap is fastest:
             continue
-        positions.append((pos['X'].to_numpy(), pos['Y'].to_numpy()))
+        positions.append(where(pos))
         holes.append(longest_gap(seconds(pos['SessionTime'])) > 1.0)
         offsets.append(clock_offset(lap, pos))
 
@@ -2053,6 +2240,7 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
 
     track = track_from_laps(positions, name=race, spacing=spacing, lam=lam,
                             speed_line=speed_line)
+    track, hills = _hills(track)
 
     # Now the line exists, place each speed sample properly: by how far
     # the car had travelled, and not by where the positions put it
@@ -2101,6 +2289,7 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
                      lap_choice=lap_choice,
                      driver=driver,
                      eased=eased,
+                     hills=hills,
                      mass=mass,
                      air_density=density,
                      conditions=f"{weight}; {air}",
@@ -2257,6 +2446,8 @@ if __name__ == '__main__':
               f"{reference.official_time:.3f}s, "
               f"{reference.lap_time:.3f}s along this line")
         print(f"  {reference.track.source}")
+        if reference.hills:
+            print(f"  {reference.hills}")
         print(f"  {reference.clock}")
         # The weight and the air, on a line each
         for part in reference.conditions.split('; '):
