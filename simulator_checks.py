@@ -10,8 +10,12 @@ the change broke something that used to work. The last line says ALL OK,
 or how many checks failed.
 
 The checks were themselves checked: the simulator was broken on purpose
-in 54 different places, one at a time, and every break made at least
+in 69 different places, one at a time, and every break made at least
 one line here say BAD.
+
+What they do not reach is build_reference(), the part that reads
+FastF1's data. That is tested outside this file, on made-up sessions
+and on real ones.
 
 The last section runs the simulator at the size of a Formula Student
 car and its events, to show the physics holds there too.
@@ -168,6 +172,7 @@ for metres in (100, 299):
 # Braking for a tight corner at the end of a straight, no wings and next
 # to no drag: the car slows at mu g
 distance = np.arange(0, 600.0, 1.0)
+distance_600 = distance             # kept for section 12
 curvature = np.zeros_like(distance)
 curvature[500:] = 1.0 / 20.0
 to_a_corner = sim.Track(name='straight then corner', distance=distance,
@@ -218,7 +223,11 @@ bend = 0.5 * (track.curvature[1:] + track.curvature[:-1])
 gaining = (speed[1:] ** 2 - speed[:-1] ** 2) / (2 * track.step)
 grip = car.grip_force(between)
 sideways = car.mass * between ** 2 * bend
-along = car.mass * gaining + car.drag(between)   # + driving, - braking
+# What holds the car back without being asked to: the air, and the drag
+# that comes with cornering (see section 12)
+share = np.minimum(sideways / grip, 1.0)
+held_back = car.drag(between) + car.corner_drag * share ** 2 * grip
+along = car.mass * gaining + held_back   # + driving, - braking
 driving = np.maximum(along, 0.0)
 
 most_grip = float((np.hypot(sideways, along) / grip).max())
@@ -414,6 +423,7 @@ def laps_seen(powers):
 # The same 640kW at both circuits, as laps from one season have
 shared, cars, tracks, outcome = sim.fit_multi(laps_seen([640e3, 640e3]), car,
                                               verbose=False)
+outcome_same = outcome              # kept for section 12
 close("braking share", shared['brake_fraction'], 0.7, 0.02)
 close("drive share", shared['drive_fraction'], 0.5, 0.02)
 close("power (kW)", shared['power'] / 1000, 640.0, 10.0)
@@ -626,6 +636,11 @@ three = sim.Track(name='three hilly laps', distance=np.arange(0, 9000.0, 1.0),
 middle = sim.simulate(three, car, initial_speed=50.0).speed[3000:6000]
 close("a hilly flying lap against the middle lap of three (s)",
       flying.lap_time, float(np.sum(1.0 / middle)), 0.01)
+# The car is braking for the hairpin as it crosses the line, on an 8%
+# climb, so the one step of braking that joins the lap up is on a slope
+worst = float(np.abs(flying.speed - middle)[-100:].max())
+check("braking across the line on a climb, the last 100m match that "
+      "middle lap", worst < 0.015, f"within {worst:.4f} m/s")
 on_the_flat = sim.simulate(loop, car, periodic=True)
 moved = float(np.abs(flying.speed - on_the_flat.speed).max())
 check("and the hills change its speed", moved > 1.0,
@@ -718,7 +733,107 @@ check("nor a lap that ends 20m higher than it began",
       not flat.slope.any() and 'cannot be right' in said, said)
 
 # ---------------------------------------------------------------------------
-print("12. At the size of a Formula Student car")
+print("12. The drag that comes with cornering")
+# ---------------------------------------------------------------------------
+
+# A tyre gripping sideways drags: with all its grip in use, by
+# corner_drag x that grip, and with a share of it in use, by corner_drag
+# x the share squared x the grip. The same car with it and without it:
+DRAGGY = sim.replace(NO_WINGS, corner_drag=0.07)
+
+check("a car made without a corner drag has none",
+      NO_WINGS.corner_drag == 0.0 and F1_2024.corner_drag > 0)
+check("on a straight it changes nothing",
+      np.array_equal(
+          sim.simulate(straight(2000.0), DRAGGY, initial_speed=40.0).speed,
+          sim.simulate(straight(2000.0), NO_WINGS, initial_speed=40.0).speed))
+
+# Coasting round a circle with next to no power and no air to push
+# through, only the corner drag slows the car. With no wings the grip is
+# mu m g, the corner uses v^2 / (R mu g) of it, and the drag works out
+# at corner_drag x m v^4 / (R^2 mu g). That gives
+# 1 / v^2 = 1 / v0^2 + 2 x corner_drag x distance / (R^2 mu g)
+coaster = sim.replace(DRAGGY, power=1e-3, cda=1e-12)
+for radius in (200.0, 400.0):
+    run = sim.simulate(circle(radius, 600.0), coaster, initial_speed=40.0)
+    exact = (1 / 40.0 ** 2 + 2 * 0.07 * 599.0
+             / (radius ** 2 * 1.5 * GRAVITY)) ** -0.5
+    close(f"coasting 599m round a {radius:.0f}m circle from 40 m/s (m/s)",
+          run.speed[-1], exact, 1e-4)
+
+# Flat out round a big circle, the car settles at the speed where its
+# power is all used: on the air, and on the corner drag
+def used_up(the_car, speed, radius):
+    """Power the air and the corner drag take at a steady speed, as a
+    share of what the car has."""
+    grip = the_car.grip_force(speed)
+    share = the_car.mass * speed ** 2 / radius / grip
+    return ((the_car.drag(speed) + the_car.corner_drag * share ** 2 * grip)
+            * speed / the_car.power)
+
+run = sim.simulate(circle(600.0, 12000.0), DRAGGY, initial_speed=40.0)
+close("flat out round a 600m circle: power used over power, at the end",
+      used_up(DRAGGY, run.speed[-1], 600.0), 1.0, 1e-3)
+without = sim.simulate(circle(600.0, 12000.0), NO_WINGS, initial_speed=40.0)
+check("and that is slower than the same car with no corner drag",
+      run.speed[-1] < without.speed[-1] - 0.5,
+      f"{run.speed[-1] * 3.6:.1f} against {without.speed[-1] * 3.6:.1f} km/h")
+run = sim.simulate(circle(250.0, 9000.0), F1_2024, initial_speed=40.0)
+close("the F1 car flat out round a 250m circle: power used over power",
+      used_up(F1_2024, run.speed[-1], 250.0), 1.0, 1e-3)
+
+# Braking while turning: a gentle 300m bend into the tight corner of
+# section 2. Each metre takes off what the tyres have left for braking
+# (the grip not being used to turn) plus the corner drag.
+bending = sim.Track(name='bend then corner', distance=distance_600,
+                    curvature=np.where(distance_600 < 500, 1 / 300.0,
+                                       1 / 20.0), source='made up')
+turner = sim.replace(stopper, corner_drag=0.07)
+run = sim.simulate(bending, turner, initial_speed=60.0)
+at = np.flatnonzero(run.limit == 'brake')[5]
+between = 0.5 * (run.speed[at] + run.speed[at + 1])
+share = between ** 2 / 300.0 / (1.5 * GRAVITY)
+exact = 1.5 * GRAVITY * (math.sqrt(1 - share ** 2) + 0.07 * share ** 2)
+close("braking in a bend: the grip left over plus the corner drag (m/s2)",
+      (run.speed[at] ** 2 - run.speed[at + 1] ** 2) / 2.0, exact, 0.02)
+check("and the corner drag is part of it",
+      0.07 * share ** 2 * 1.5 * GRAVITY > 0.05,
+      f"{0.07 * share ** 2 * 1.5 * GRAVITY:.2f} of {exact:.2f} m/s2")
+
+# On a whole lap it can only cost time, and more of it costs more
+laps_with = [sim.simulate(track, sim.replace(car, corner_drag=amount),
+                          periodic=True).lap_time
+             for amount in (0.0, 0.035, 0.07, 0.14)]
+check("more corner drag, slower lap",
+      all(later > earlier + 0.01
+          for earlier, later in zip(laps_with, laps_with[1:])),
+      ", ".join(f"{seconds:.2f}s" for seconds in laps_with))
+
+# The fit holds the corner drag at what the base car has. The laps of
+# section 8 were driven by a car with the base car's 0.07.
+check("a fit keeps the corner drag the base car has",
+      all(found.corner_drag == car.corner_drag for found in cars))
+# Told there is none, it has to explain the same laps another way, and
+# cannot do it as well.
+shared_none, cars_none, tracks_none, outcome_none = sim.fit_multi(
+    laps_seen([640e3, 640e3]), sim.replace(car, corner_drag=0.0),
+    verbose=False)
+check("fitted without it, laps driven with it fit worse",
+      outcome_none.cost > 10 * outcome_same.cost + 1e-9,
+      f"squared error {outcome_none.cost:.2e} against "
+      f"{outcome_same.cost:.2e}")
+# Asked to, the fit can find the corner drag as well, on laps as clean
+# as these. On real laps it cannot be trusted to (see CORNER DRAG in the
+# notes at the top of Simulator.py), which is why it is held.
+shared_asked, cars_asked, tracks_asked, outcome_asked = sim.fit_multi(
+    laps_seen([640e3, 640e3]), sim.replace(car, corner_drag=0.03),
+    shared=('brake_fraction', 'drive_fraction', 'power', 'corner_drag'),
+    verbose=False)
+close("asked for it, the fit finds the corner drag on clean laps",
+      shared_asked['corner_drag'], 0.07, 0.005)
+
+# ---------------------------------------------------------------------------
+print("13. At the size of a Formula Student car")
 # ---------------------------------------------------------------------------
 
 # Something like a Formula Student car: 280kg with its driver, 60kW at

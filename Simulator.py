@@ -13,9 +13,10 @@ follows a racing line (see GEOMETRY).
 
 MODEL ASSUMPTIONS AND LIMITATIONS
 
-This is a point mass with three refinements: load-sensitive tyres, a
-driven-axle limit on acceleration, and a tractive force cap at low speed.
-It runs on a track with hills (see HILLS). Not modelled:
+This is a point mass with four refinements: load-sensitive tyres, a
+driven-axle limit on acceleration, a tractive force cap at low speed,
+and the drag that comes with cornering (see CORNER DRAG). It runs on a
+track with hills (see HILLS). Not modelled:
   - explicit weight transfer between individual wheels
   - aerodynamic balance shifting with ride height
   - a torque curve and gear ratios; power is a single figure
@@ -102,8 +103,8 @@ get the car through it. Jeddah in 2021 has six such kinks, of 7 to
 asks for more than MOST_LATERAL_G at the real speed, the bend is eased
 to the tightest one that speed allows (see _eased), and the loading
 report says where. At Jeddah that is 159m in all. Fitted together with
-Bahrain, the fit's squared error falls by 38%, and Jeddah's lap comes
-out 0.47s from the real one where it was 0.89s. At Monza and Bahrain
+Bahrain, the fit's squared error falls by 39%, and Jeddah's lap comes
+out 0.50s from the real one where it was 0.89s. At Monza and Bahrain
 nothing is eased, and at Spa 9m.
 
 Longer stretches are left alone and reported. A long stretch over the
@@ -171,9 +172,9 @@ grip figure has to serve the corners, the braking and the drive out of
 the corners, and the real laps want far more for the first than for the
 other two. With them the fit's sum of squared differences on real laps
 (Monza and Spa 2020, Bahrain 2022, and Bahrain with Jeddah 2021) falls
-by 38 to 57%, and they come out at line 0.80 to 0.91, brake_fraction
-0.60 to 0.75 and drive_fraction 0.45 to 0.48. (Jeddah's own line is
-0.57. Its map is the worst of the four: see GEOMETRY.)
+by 44 to 62%, and they come out at line 0.80 to 0.91, brake_fraction
+0.58 to 0.70 and drive_fraction 0.46 to 0.49. (Jeddah's own line is
+0.56. Its map is the worst of the four: see GEOMETRY.)
 
 The tyre's own grip, mu, is not fitted, because it cannot be. A car
 with a grip of 1.75 and a line of 0.8, braking with 0.6 of its grip and
@@ -197,16 +198,16 @@ real car was not yet slowing hard.
 Where the fit is still out. On three real races (Monza and Spa 2020,
 Bahrain 2022, fitted with a power for each because the seasons differ)
 the simulated speed is 7 to 10 km/h from the real one, rms. Split by
-what limits the simulated car at each point: the 83% of the lap where
-it is the engine holds 57% of the squared error, the 13% under braking
-holds 29%, and the 4% at the cornering limit holds 13%. Half of it all
-lies in the last 200m before the braking points, where the simulated
-car is about 4 km/h too fast. At Monza and Spa it starts the long
-straights 4 to 6 km/h too slow, and at all three it arrives 5 to 11
-km/h too fast. That is the battery running low, which the model does
-not have (see WEIGHT, AIR AND POWER). At the cornering limit it is 1 to
-8 km/h too slow on average and 16 to 17 km/h out rms: too slow at some
-corners, too fast at others.
+what limits the simulated car at each point: the 84% of the lap where
+it is the engine holds 54% of the squared error, the 13% under braking
+holds 32%, and the 4% at the cornering limit holds 14%. Over two fifths
+of it all lies in the last 200m before the braking points, where the
+simulated car is 4 to 5 km/h too fast. At Monza and Spa it starts the
+long straights 5 to 9 km/h too slow, and at all three it arrives 6 to
+12 km/h too fast. That is the battery running low, which the model
+does not have (see WEIGHT, AIR AND POWER). At the cornering limit it is
+up to 7 km/h too slow on average and 15 to 17 km/h out rms: too slow at
+some corners, too fast at others.
 
 One line number for a whole circuit is a simplification, and those
 corner speeds show it. Two ways of doing better through the geometry
@@ -252,8 +253,8 @@ kilogram. Real laps ask for less: 640 to 850W on four races from 2020
 to 2022. With only the weight put right the fit got worse, because the
 lighter car had still more power for each kilogram. So fit_multi() now
 fits the power, one figure for all the circuits fitted together. On
-Monza and Spa in 2020 (one car, a week apart) it comes out at 569kW,
-and the drag number at 1.23 at Monza and 1.44 at Spa, where it had
+Monza and Spa in 2020 (one car, a week apart) it comes out at 580kW,
+and the drag number at 1.25 at Monza and 1.42 at Spa, where it had
 been 1.55 and 1.86.
 
 That power is not the engine's rating, which for an F1 car is about
@@ -265,16 +266,34 @@ running low before the end of a long straight.
 The battery is the big one, and it can be seen in the data. Part of an
 F1 car's power is electric, the battery cannot supply it for a whole
 lap, and so the car goes without it towards the end of the straights.
-Measured on 37 real laps from the four races, at full throttle in a
+Measured on 66 real laps of the four races, at full throttle in a
 straight line: with more than 5s to go before the driver lifts, the
-car gains speed as its power and drag say it should. With 3 to 4s to go
-it is 4% of its power short, with 2s to go 14%, and in the last second
-25%. On the main straight at Monza Hamilton's speed fell from 333 to
-323 km/h over his last four seconds at full throttle. How much and how
-early differs from straight to straight and car to car. The model has
-one power figure all the way, so the simulated car is too slow early
-in a long straight and too fast at the end of it (see Where the fit is
+car gains speed as its power and drag say it should. At Monza, Spa and
+Jeddah it is 4 to 10% of its power short with 3 to 4s to go, 13 to 19%
+with 2s to go and 21 to 28% in the last second. At Bahrain in 2022,
+where the straights are shorter, it starts 2.5s out and reaches 13%.
+On the main straight at Monza Hamilton's speed fell from 333 to 323
+km/h over his last four seconds at full throttle. The model has one
+power figure all the way, so the simulated car is too slow early in a
+long straight and too fast at the end of it (see Where the fit is
 still out, under FITTING).
+
+A model of the battery has been tried four ways, and none is in this
+file. Three made the power fall away over the last seconds of every
+flat-out stretch, by a rule the fit could tune. The fourth used no
+rule: wherever the real car lost speed at full throttle, the simulated
+car was held to the real car's speed. The rules matched the speed
+traces better, by 6 to 10%. But all four made cars that should agree,
+agree less. On 79 real laps fitted one at a time, the drag numbers of
+team-mates differed by 8% (root mean square, 27 pairs) with no battery
+model, by 10% with the best of the rules and by 9% with the real speed
+held. The reason is that when a car goes without its battery is its
+team's choice, straight by straight. On one lap of Monza the cars'
+speeds peaked anything from no time at all to five and a half seconds
+before the driver lifted. One rule for every straight is wrong for
+each car in its own way, and taking the ends of the straights out of
+the fit leaves less to find the drag from. So the power stays one
+figure, and it means the average while flat out.
 
 One power for every circuit suits laps from one season. For laps from
 different seasons the fit can find a power for each circuit instead
@@ -285,24 +304,24 @@ Monza and Spa laps placed on the middle of the road, where every
 corner is wrong, the fit asked for 746kW. Two checks:
   - On 16 real laps (eight drivers at Monza and at Spa in 2020), with
     each circuit fitted on its own, the four cars with Mercedes engines
-    came out within 1.8% of their average at Monza and 1.9% at Spa.
-    Every car came out weaker at Spa than at Monza, by 2 to 8% and 6%
+    came out within 1.8% of their average at Monza and 2.2% at Spa.
+    Every car came out weaker at Spa than at Monza, by 3 to 11% and 7%
     on average (see HILLS for why).
   - On made-up laps where every corner asked for its own line, as real
     corners do, a power fitted for one circuit alone was typically 5%
-    out and 18% out one time in ten, and the drag went with it. One
-    power for all three circuits was typically 3% out and 6% out one
+    out and 15% out one time in ten, and the drag went with it. One
+    power for all three circuits was typically 2% out and 7% out one
     time in ten.
 
 The lap times agree a little less well than they did. At Monza the
-simulated lap is now 0.3s slower than the real one, where it had been
-within 0.1s. It agreed for the wrong reason. A lap time is the sum of
-errors that pull both ways: the simulated car is slower than the real
-one out of the corners and through some of them, and quicker at the end
-of the straights. With too much power the two happened to cancel. The
-fit matches the speed at every point and takes little notice of the lap
-time, and the speeds are now closer (see Where the fit is still out,
-under FITTING).
+simulated lap is now 0.2 to 0.4s slower than the real one, where it had
+been within 0.1s. It agreed for the wrong reason. A lap time is the sum
+of errors that pull both ways: the simulated car is slower than the
+real one out of the corners and through some of them, and quicker at
+the end of the straights. With too much power the two happened to
+cancel. The fit matches the speed at every point and takes little
+notice of the lap time, and the speeds are now closer (see Where the
+fit is still out, under FITTING).
 
 HILLS
 
@@ -335,25 +354,93 @@ hills or without.)
 
 On the real laps the hills matter at Spa and nowhere else of the four.
 At Monza, Bahrain and Jeddah the fitted numbers move by 2% or less.
-Fitted on its own, Spa's power falls from 590 to 540kW and its drag
-number from 1.54 to 1.36, and its squared error falls by 4%. The car
-had looked draggier than it is, because it reaches its top speed going
-uphill.
+Fitted on its own, Hamilton's Spa lap gives a power of 539kW where a
+flat track gave 608, and a drag number of 1.31 for 1.58, and its
+squared error falls by 3%. The car had looked draggier than it is,
+because it reaches its top speed going uphill, and stronger, because
+it gains speed fastest going down.
 
-That shows up something the flat track had been hiding. Fitted one
-circuit at a time, the same car now comes out weaker at Spa than at
-Monza, a week apart: by 7% for each of the four Mercedes-engined cars
-(give or take 1%), and by 4% on average for four others. The hills are
-not the cause. The battery is (see WEIGHT, AIR AND POWER): Spa's two
-long straights outlast it, so the car's power averaged over its
-flat-out running really is lower there. On the flat track the two
-errors happened to cancel.
+The cars feel the hills the heights say are there. That can be checked
+with no lap simulation, the way the corner drag was measured (see
+CORNER DRAG): at full throttle, how fast a car gains speed says what
+is pushing it on and what is holding it back, and the size of the
+hills' pull can be left for the data to choose. At Spa it chose 1.04
+times what the heights say, give or take 0.05. At the other three,
+where the slopes are too gentle to say much, 0.8 to 1.4.
+
+The hills show up something the flat track had been hiding. Fitted one
+circuit at a time, the same car comes out weaker at Spa than at Monza,
+a week apart: by 10% for each of the four Mercedes-engined cars (give
+or take 1%), and by 5% on average for four others. The hills are not
+the cause. Most of it is the battery (see WEIGHT, AIR AND POWER): Spa's
+two long straights outlast it, so the car's power averaged over its
+flat-out running is lower there. The cars' own acceleration says so
+too, with no lap simulation: 8% less power at Spa, and 2 to 3% less
+once the power lost late in the straights is allowed for. On the flat
+track the two errors happened to cancel.
 
 Not in the model: crests and dips. Through the dip at the foot of
 Raidillon the road pushes up on the car and its tyres have more load
 and more grip, and over the crest at the top they have less. And the
 distance along a Track is measured on the map, so on a slope the road
 itself is a little longer: 1.3% on a 16% climb.
+
+CORNER DRAG
+
+A tyre does not grip sideways while pointing exactly the way it is
+going. It has to be turned a little further into the corner, by what
+is called its slip angle, and its grip acts square to the way it
+points. So part of that grip pulls the car back. At a slip angle of 4
+degrees the part is 7%. For an F1 car in a 3g corner at 250 km/h that
+is 1,150N, a third of its drag from the air, and at 4g it is 2,000N. A
+real car at full throttle in a fast corner gains speed more slowly
+than on a straight for this reason, and through some it loses speed.
+
+The angle grows with how hard the tyre is working. Here it is taken in
+proportion to the share of the grip in use, which is how a tyre
+behaves until it nears its limit. A Car's corner_drag is the share of
+its sideways grip that drags when all the grip is in use, so the drag
+is corner_drag x the share in use, squared, x the grip (see
+available_longitudinal). It is there whenever the car turns: gaining
+speed, where it holds the car back, and braking, where it helps. A
+Car made without one has none.
+
+The 0.07 of F1_2024 was measured, with no lap simulation. At full
+throttle, how fast a car gains speed says how hard it is being pushed.
+In a straight line its power and the air's drag account for that. In a
+corner some of the push is missing. Taken from 66 real laps of four
+races (every sample at full throttle above 200 km/h, each lap with its
+own power and drag, and the power lost late in a straight allowed for:
+see WEIGHT, AIR AND POWER), a slip angle of 3.2 to 4.0 degrees accounts
+for what is missing at all four: Monza, Spa, Jeddah, whose map is the
+worst of the four, and Bahrain two seasons later on different tyres.
+The same angle does for a car using a tenth of its grip and one using
+seven tenths, which is what taking it in proportion says. The same
+sums, asked how hard the car's weight pulls it back on a hill, give
+1.04 times what the heights say at Spa (see HILLS). That is a check on
+both.
+
+What it did on real laps. 79 laps of those four races, each fitted on
+its own, fit 5% better. Cars that should come out alike did so more
+nearly: the power of team-mates differed by 5.2% (root mean square, 27
+pairs) where it had been 5.9%, their drag by 7.0% for 7.9%, and the
+power of cars with the same engine by 3.7% for 4.7%. On Hamilton's
+Monza and Spa laps of 2020 fitted together, the power went from 569 to
+580kW.
+
+It is not fitted (see fit_multi). Left free on those 79 laps, the fit
+asked for 3 degrees at Monza and 8 to 14 at the other three: it was
+using the number to make up for other things it has wrong in the
+corners. Tested on 16 made-up sessions with a known car. Where the
+true car had a corner drag of 0.07, a fit that left it out had the
+drag line of the setup table 6% out and the power line 4%, and a fit
+holding 0.07 had both 2% out. Where the true figure was 0.04 or 0.12,
+holding 0.07 still did better than leaving it out. Where the true car
+had none, holding 0.07 cost a point or two on each of those lines.
+
+For another car the figure comes from tyre test data: the tyre's grip
+(mu) over its cornering stiffness, which is the sideways force it
+gives for each radian of slip angle, as a share of the load on it.
 
 STEPPING
 
@@ -387,7 +474,8 @@ sum for a lap already at speed, and from rest the time has to be added
 up step by step, each step at the average of the speeds at its two ends
 (the checks do it that way, and get the exact 75m time). A Track made
 by hand can be given a slope at each of its points, so a course on a
-hill can be run as it is.
+hill can be run as it is. And a Car made by hand has no corner drag
+until it is given one: CORNER DRAG says where the figure comes from.
 
 SPEED
 
@@ -442,6 +530,8 @@ class Car:
     max_tractive_force: float = 1e9   # N, torque limit at low speed
     drs_cda_delta: float = 0.0        # drag reduction when DRS is open
     air_density: float = AIR_DENSITY  # kg/m3, the air it is running in
+    corner_drag: float = 0.0          # share of the sideways grip that
+                                      # drags, with all the grip in use
 
     def __post_init__(self):
         # Store plain Python numbers. The optimiser hands over numpy ones,
@@ -482,7 +572,9 @@ class Car:
 # replaces its downforce, drag, power and the two shares of grip, and
 # each real lap brings its own weight and air (see WEIGHT, AIR AND POWER
 # in the notes above). What a fit keeps from here is the tyre (mu,
-# load_sensitivity, reference_load), brake_limit and max_tractive_force.
+# load_sensitivity, reference_load, corner_drag), brake_limit and
+# max_tractive_force. The corner drag is the one number here that was
+# measured on real cars (see CORNER DRAG in the notes above).
 F1_2024 = Car(
     name="F1 2024",
     mass=850.0,
@@ -496,6 +588,7 @@ F1_2024 = Car(
     drive_fraction=0.55,
     max_tractive_force=18_000.0,
     drs_cda_delta=0.30,
+    corner_drag=0.07,
 )
 
 # The least an F1 car may weigh with its driver on board and no fuel, in
@@ -1066,7 +1159,9 @@ def available_longitudinal(car, speed, curvature, braking=False, slope=0.0):
     One grip budget shared between cornering and accelerating or braking,
     via a friction ellipse. slope is how steeply the track climbs there
     (see Track): on a climb the car's weight holds it back and helps it
-    slow, and on a drop the other way round.
+    slow, and on a drop the other way round. Cornering brings a drag of
+    its own (see CORNER DRAG in the notes at the top of this file),
+    which holds the car back and helps it slow in the same way.
 
     speed and curvature are single numbers, not arrays. simulate() calls
     this for every point of the lap in both directions, so it uses
@@ -1079,7 +1174,12 @@ def available_longitudinal(car, speed, curvature, braking=False, slope=0.0):
     used = min(max(lateral_force / max(grip, 1e-9), 0.0), 1.0)
     remaining = math.sqrt(max(1.0 - used ** 2, 0.0))
 
-    drag = car.drag(speed)
+    # The air's drag, plus the drag that comes with cornering: a tyre
+    # gripping sideways points a little to one side of the way it is
+    # going, so part of its grip pulls the car back. The more of the
+    # grip is in use the bigger that angle, so the drag grows with the
+    # share in use, squared (see CORNER DRAG in the notes above).
+    drag = car.drag(speed) + car.corner_drag * used * used * grip
     # The part of the car's weight that pulls it back down the hill
     hill = car.mass * GRAVITY * slope
 
@@ -1341,6 +1441,7 @@ SHARED_BOUNDS = {
     'brake_limit': (3.0, 9.0),
     'brake_fraction': (0.2, 1.5),
     'power': (300_000.0, 1_000_000.0),
+    'corner_drag': (0.0, 0.3),
 }
 CIRCUIT_BOUNDS = {
     'cla': (2.5, 7.5),
@@ -1372,7 +1473,8 @@ def fit_multi(references, base_car,
 
     What is fitted, and what is not:
       - The tyre's grip (mu) is NOT fitted. It is taken from base_car,
-        like load_sensitivity, as something known about the tyre.
+        like load_sensitivity and corner_drag, as something known
+        about the tyre.
       - The car's weight and the air's density are NOT fitted. They
         come with each reference where it knows them (see
         build_reference), and from base_car where it does not.
@@ -1412,7 +1514,10 @@ def fit_multi(references, base_car,
     known car: load_sensitivity trades off against downforce and comes
     out badly wrong, and brake_limit does nothing for a car like this
     (its tyres give up before its brakes do), so both are better held
-    at an assumed value than fitted.
+    at an assumed value than fitted. corner_drag is held for the same
+    reason: on real laps a fit left to find it gave 3 to 14 degrees of
+    slip angle where the cars' own acceleration says 4 (see CORNER DRAG
+    in the notes at the top of this file).
 
     Returns (shared_values, per_circuit_cars, tracks, outcome). tracks
     are the references' tracks with each circuit's line applied.
@@ -1566,6 +1671,9 @@ def fit_multi(references, base_car,
         if 'mu' not in shared:
             print(f"\n  Tyre grip taken as {base_car.mu:.2f} (assumed, not "
                   f"fitted).")
+        if 'corner_drag' not in shared:
+            print(f"  Corner drag taken as {base_car.corner_drag:.2f} of the "
+                  f"sideways grip (the base car's, not fitted).")
         print("  Shared by every circuit:")
         for name, value in shared_values.items():
             print(f"    {name}: {shown(name, getattr(base_car, name))} "
@@ -2379,18 +2487,18 @@ def setup_effects(track, car, changes=SETUP_CHANGES):
     fit told the weight and the air as it is for a real lap. What
     matters most is whether the corners all ask for the same line
     number (see FITTING in the notes at the top of this file).
-      - Where they did (56 sessions), every figure was within 9% of
+      - Where they did (56 sessions), every figure was within 8% of
         the truth nine times in ten.
       - Where each corner asked for its own (28 sessions), as on real
-        laps, the drag, power and grip figures were within 8, 10 and
-        12% nine times in ten. The downforce figure was typically 14%
-        out and 45% at worst. The mass figure was typically 11% out and
-        29% at worst.
+        laps, the drag, power and grip figures were within 6, 11 and
+        11% nine times in ten. The downforce figure was typically 13%
+        out and 33% at worst. The mass figure was typically 11% out and
+        27% at worst.
     So on real circuits trust the drag and power figures most, and
     treat the downforce and mass figures as rough. There is one check
     from outside: teams reckon 10kg of fuel costs about 0.3s a lap, and
-    on real fitted circuits this gives 0.26s at Monza, 0.29s at Bahrain
-    and 0.35s at Spa.
+    on real fitted circuits this gives 0.27s at Monza, 0.30s at Bahrain
+    and 0.36s at Spa.
 
     Returns a dict of {what the change is called: seconds}.
     """
