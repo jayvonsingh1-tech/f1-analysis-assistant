@@ -481,15 +481,18 @@ taken:
     tight.
   - A fit to that one lap finds the power within 2% and the drag
     within 3%, and every row of the table of what a change is worth
-    within 2 to 4%. Three numbers come out low every time: the braking
-    share by up to 2%, line by 1 to 2% and the downforce by 1 to 5%.
-    The first is the braking points again. The other two are the
-    tightest bends coming out too tight, which the fit takes for a car
-    on a wider line with less downforce.
+    within 2 to 4%. The braking share comes out up to 2% low every
+    time: the braking points again. Line and the downforce come out a
+    few per cent out, together, and which way depends on the bends.
+    The line through the positions is smoothed, and smoothing makes a
+    short bend that tightens sharply come out up to 6% too tight, and
+    one that tightens gently up to 6% too slack. On this circuit,
+    whose bends reach their full tightness within 0.4s, line is 1 to
+    2% low and the downforce 1 to 5% low. Given bends that take twice
+    as long over it or more, they come out 1 to 3% and 2 to 5% high.
 The made-up car brakes at full strength from one metre to the next,
-and its fastest bends reach their full tightness in a quarter of a
-second, sooner than a real car can be turned in. So real laps should
-lose no more than this.
+which a real driver does not, so real laps should lose less than this
+at the braking points.
 
 OTHER CARS
 
