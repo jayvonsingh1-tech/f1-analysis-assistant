@@ -459,8 +459,37 @@ CHECKS
 
 simulator_checks.py holds checks that need no F1 data: corners and
 straights with exact answers, rules every lap has to obey, the fit
-finding a car it was not told about. Run it after every change to this
-file:  python simulator_checks.py
+finding a car it was not told about, and a made-up race read the way a
+real one is. Run it after every change to this file:
+python simulator_checks.py
+
+The made-up race is the one place where the reading of a race can be
+set against the truth: a known car on a known circuit, its laps written
+out as FastF1 records them and handed to build_reference(). So it also
+says what that reading costs. The checks run it once. Tried on 40
+versions of it, which differ only in the moments the samples were
+taken:
+  - The speed clock's offset is found to within 0.001s. With positions
+    that drift and jump as real ones do, and time stamps a little out,
+    it is found to within 0.015s, which is about a metre at speed.
+  - Each speed reading lands within 0.5 to 0.9 km/h of the truth on
+    average. The worst point of the lap is 5 to 10 km/h out, and it is
+    always a braking point: four samples a second cannot say to the
+    metre where the driver hit the brakes.
+  - The bends come out within 0.1g of the circuit's on average, at the
+    speed the car is doing. The tightest one comes out 1 to 5% too
+    tight.
+  - A fit to that one lap finds the power within 2% and the drag
+    within 3%, and every row of the table of what a change is worth
+    within 2 to 4%. Three numbers come out low every time: the braking
+    share by up to 2%, line by 1 to 2% and the downforce by 1 to 5%.
+    The first is the braking points again. The other two are the
+    tightest bends coming out too tight, which the fit takes for a car
+    on a wider line with less downforce.
+The made-up car brakes at full strength from one metre to the next,
+and its fastest bends reach their full tightness in a quarter of a
+second, sooner than a real car can be turned in. So real laps should
+lose no more than this.
 
 OTHER CARS
 
@@ -2107,9 +2136,10 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
     Geometry is pooled from up to max_laps clean laps. Every lap lies on
     the same map path whatever the tyres or the fuel load, so any clean
     lap will do. Speed comes from one lap alone: the driver's quickest
-    with DRS shut. Its clock is lined up with the position data's first
-    (see _stream_offset), and each speed sample is then placed on the
-    track by how far the car had travelled (see _speed_by_distance).
+    with DRS shut, among the laps whose speed data can be used. Its
+    clock is lined up with the position data's first (see
+    _stream_offset), and each speed sample is then placed on the track
+    by how far the car had travelled (see _speed_by_distance).
 
     The position data has heights too, and the track's slope comes from
     those (see track_from_laps and _hills). The reference's `hills`
@@ -2150,6 +2180,31 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
             return car
         return car[car['Speed'] > 0]
 
+    def speed_samples(lap, pos):
+        """A lap's speed samples and the time each is stamped, with five
+        from the laps either side so that both ends of the lap are
+        covered. None if they cannot be used: they cannot be read, or
+        fewer than 50 of them fall within the lap's position data, or
+        somewhere in the lap, its two ends included, there are none for
+        over three seconds.
+
+        Why three. A shorter hole does little harm, and real laps have
+        them: on the 2022 race checked, four laps in ten go 1.0 to 1.4s
+        without a sample somewhere. None of 2,900 real laps goes 2s."""
+        try:
+            car = measured_speed(lap, pad=5, pad_side='both')
+            stamps = seconds(car['SessionTime'])
+            speed = car['Speed'].to_numpy()
+            pos_time = seconds(pos['SessionTime'])
+        except Exception:
+            return None
+        inside = stamps[(stamps >= pos_time[0]) & (stamps <= pos_time[-1])]
+        if len(inside) < 50:
+            return None
+        waits = np.diff(np.concatenate([[pos_time[0]], inside,
+                                        [pos_time[-1]]]))
+        return (stamps, speed) if waits.max() <= 3.0 else None
+
     def clock_offset(lap, pos):
         """The speed clock's offset measured on one lap, or None."""
         try:
@@ -2188,25 +2243,50 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
         raise ValueError(f"{driver} has no clean laps with position data "
                          f"at {race} {year}.")
 
-    # The lap to fit is the quickest one with DRS shut. In a race DRS
+    # The lap to fit is the quickest one whose speed data can be used.
+    # Quicker laps without it are passed over, and a note further down
+    # says which.
+    quickest_first = sorted(usable, key=lambda entry: entry[0])
+    passed_over = []
+    first_choice = None
+    for place, (lap_time, lap, pos) in enumerate(quickest_first):
+        fastest_speed = speed_samples(lap, pos)
+        if fastest_speed is not None:
+            first_choice = place
+            break
+        passed_over.append(int(lap['LapNumber']))
+    if first_choice is None:
+        raise ValueError(f"{driver} has no clean laps with speed data at "
+                         f"{race} {year}.")
+    official_time, fastest, fastest_pos = quickest_first[first_choice]
+    lap_choice = f"lap {int(fastest['LapNumber'])}, the quickest"
+    if passed_over:
+        lap_choice += " with speed data that can be used"
+
+    # Better still is the quickest one with DRS shut. In a race DRS
     # comes with a tow from the car ahead, and both cut drag in a way
     # the model knows nothing about. If DRS was open on every lap, the
     # quickest of all has to do, and a warning further down says so.
-    quickest_first = sorted(usable, key=lambda entry: entry[0])
-    official_time, fastest, fastest_pos = quickest_first[0]
-    lap_choice = f"lap {int(fastest['LapNumber'])}, the quickest"
     drs_open = drs_share(fastest)
     if drs_open >= 0.01:
-        for lap_time, lap, pos in quickest_first[1:]:
-            if drs_share(lap) < 0.01:
-                lap_choice = (f"lap {int(lap['LapNumber'])}, the quickest "
-                              f"with DRS shut (lap "
-                              f"{int(fastest['LapNumber'])} was "
-                              f"{lap_time - official_time:.2f}s quicker "
-                              f"with it open)")
-                official_time, fastest, fastest_pos = lap_time, lap, pos
-                drs_open = 0.0
-                break
+        without_speed = []
+        for lap_time, lap, pos in quickest_first[first_choice + 1:]:
+            if drs_share(lap) >= 0.01:
+                continue
+            speed = speed_samples(lap, pos)
+            if speed is None:
+                without_speed.append(int(lap['LapNumber']))
+                continue
+            lap_choice = (f"lap {int(lap['LapNumber'])}, the quickest "
+                          f"with DRS shut (lap "
+                          f"{int(fastest['LapNumber'])} was "
+                          f"{lap_time - official_time:.2f}s quicker "
+                          f"with it open)")
+            official_time, fastest, fastest_pos = lap_time, lap, pos
+            fastest_speed = speed
+            passed_over += without_speed
+            drs_open = 0.0
+            break
 
     # What the car weighed on that lap, and the air it ran in. The laps
     # cannot say either (see WEIGHT, AIR AND POWER in the notes at the
@@ -2254,15 +2334,22 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
         holes.append(longest_gap(seconds(pos['SessionTime'])) > 1.0)
         offsets.append(clock_offset(lap, pos))
 
-    # track_from_laps() lines every lap up against the first one in the
-    # list, so the first should have no hole of over a second in it
-    # (samples normally arrive four or five times a second). That is the
-    # fastest lap unless it has a hole and another lap has none.
+    # Problems found in the data, for the loading report
     notes = []
+    if passed_over:
+        which = (f"lap {passed_over[0]} was" if len(passed_over) == 1
+                 else f"laps {', '.join(map(str, passed_over))} were")
+        notes.append(f"{which} quicker, but had no speed data that could "
+                     f"be used")
     if drs_open >= 0.01:
         notes.append(f"DRS was open for {drs_open:.0%} of this lap, and no "
                      f"clean lap had it shut. The model has no DRS, so the "
                      f"fitted drag is a blend of open and shut")
+
+    # track_from_laps() lines every lap up against the first one in the
+    # list, so the first should have no hole of over a second in it
+    # (samples normally arrive four or five times a second). That is the
+    # fastest lap unless it has a hole and another lap has none.
     fastest_has_hole = holes[0]
     if holes[0] and not all(holes):
         positions.insert(0, positions.pop(holes.index(False)))
@@ -2307,44 +2394,18 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
     # enough for track_from_laps() to set its clock by. With no clock
     # correction to make, the two streams are taken as they come.
     shift = 0.0 if stream_offset is None else stream_offset
-    speed_line = car_stamps = car_speed = None
-    try:
-        car = measured_speed(fastest, pad=5, pad_side='both')
-        car_stamps = seconds(car['SessionTime'])
-        car_speed = car['Speed'].to_numpy()
-        car_time = car_stamps - shift
-        inside = (car_time >= pos_time[0]) & (car_time <= pos_time[-1])
-        if inside.sum() < 50:
-            raise ValueError("too little speed data")
-        speed_line = (
-            np.interp(car_time[inside], pos_time, fastest_pos['X']),
-            np.interp(car_time[inside], pos_time, fastest_pos['Y']),
-            car_speed[inside])
-        if longest_gap(car_time[inside]) > 1.0:
-            notes.append(f"this lap has a "
-                         f"{longest_gap(car_time[inside]):.1f}s hole in "
-                         f"its speed data, so the real speed there is a "
-                         f"guess")
-    except Exception:
-        speed_line = car_stamps = None
-        if stream_offset is not None:
-            stream_offset = None
-            clock = ("this lap's speed data could not be read on its "
-                     "own: clocks not corrected")
-
-    if speed_line is None:
-        # The last resort: FastF1's own merge of the two streams. It
-        # reads positions between samples, so a made-up sample at 0, 0
-        # drags its neighbours towards it. Keep only what lies within
-        # 20m of a position that was really measured.
-        tel = fastest.get_telemetry()
-        real = cKDTree(np.column_stack([fastest_pos['X'], fastest_pos['Y']]))
-        spot = np.column_stack([tel['X'], tel['Y']]).astype(float)
-        known = np.isfinite(spot).all(axis=1)
-        away = np.full(len(tel), np.inf)
-        away[known] = real.query(spot[known])[0]
-        tel = tel[(away < 200) & (tel['Speed'] > 0).to_numpy()]
-        speed_line = (tel['X'], tel['Y'], tel['Speed'])
+    # The speed samples that speed_samples() read when the lap was
+    # chosen, now on the position data's clock
+    car_stamps, car_speed = fastest_speed
+    car_time = car_stamps - shift
+    inside = (car_time >= pos_time[0]) & (car_time <= pos_time[-1])
+    speed_line = (np.interp(car_time[inside], pos_time, fastest_pos['X']),
+                  np.interp(car_time[inside], pos_time, fastest_pos['Y']),
+                  car_speed[inside])
+    if longest_gap(car_time[inside]) > 1.0:
+        notes.append(f"this lap has a {longest_gap(car_time[inside]):.1f}s "
+                     f"hole in its speed data, so the real speed there is "
+                     f"a guess")
 
     track = track_from_laps(positions, name=race, spacing=spacing, lam=lam,
                             speed_line=speed_line)
@@ -2352,14 +2413,12 @@ def build_reference(year, race, driver=None, spacing=1.0, lam=None,
 
     # Now the line exists, place each speed sample properly: by how far
     # the car had travelled, and not by where the positions put it
-    placed = None
-    if car_stamps is not None:
-        try:
-            placed = _speed_by_distance(track, pos_time, fastest_pos['X'],
-                                        fastest_pos['Y'], car_stamps,
-                                        car_speed, shift)
-        except Exception:
-            placed = None
+    try:
+        placed = _speed_by_distance(track, pos_time, fastest_pos['X'],
+                                    fastest_pos['Y'], car_stamps, car_speed,
+                                    shift)
+    except Exception:
+        placed = None
     if placed is not None:
         track.channels['speed_kph'] = placed
     else:

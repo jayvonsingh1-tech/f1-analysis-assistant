@@ -9,13 +9,18 @@ Run it after every change to Simulator.py. A line that says BAD means
 the change broke something that used to work. The last line says ALL OK,
 or how many checks failed.
 
-The checks were themselves checked: the simulator was broken on purpose
-in 69 different places, one at a time, and every break made at least
-one line here say BAD.
+Section 13 checks the part that reads FastF1's data, build_reference().
+It makes up a race with a known car, writes that car's laps out the way
+FastF1 records them, and compares what build_reference() makes of them
+with the truth. It needs pandas, which FastF1 needs too.
 
-What they do not reach is build_reference(), the part that reads
-FastF1's data. That is tested outside this file, on made-up sessions
-and on real ones.
+The checks were themselves checked: the simulator was broken on
+purpose, one place at a time, to see whether a line here says BAD. For
+sections 1 to 12 that was 69 places, and every one was caught. For the
+part that reads FastF1's data it was about 100 places. About a dozen of
+those change nothing that can be measured on the made-up race (each is
+a second safeguard behind a first one, or a refinement too small to
+see), and the rest were caught.
 
 The last section runs the simulator at the size of a Formula Student
 car and its events, to show the physics holds there too.
@@ -23,8 +28,11 @@ car and its events, to show the physics holds there too.
 
 import math
 import sys
+import types
 
 import numpy as np
+import pandas as pd
+from scipy.spatial import cKDTree
 
 import Simulator as sim
 from Simulator import AIR_DENSITY, F1_2024, GRAVITY
@@ -833,7 +841,777 @@ close("asked for it, the fit finds the corner drag on clean laps",
       shared_asked['corner_drag'], 0.07, 0.005)
 
 # ---------------------------------------------------------------------------
-print("13. At the size of a Formula Student car")
+print("13. A made-up race, read the way a real one is")
+# ---------------------------------------------------------------------------
+
+# build_reference() turns the raw samples of a race into a lap the fit
+# can use. It cannot be checked on a real race, where nobody knows the
+# true car. So this section makes a race up: a circuit and a car that
+# are known exactly, and that car's laps written out the way FastF1
+# records them. Positions come about 4.5 times a second, in tenths of a
+# metre. Speed comes about 4 times a second, in whole km/h, stamped by
+# a clock of its own that runs late. build_reference() is then handed
+# the race as if it were a real one, and what it makes of it is
+# compared with the truth.
+
+# Each bend of the made-up circuit, in the order they are driven: the
+# straight before it in metres, the angle it turns through in degrees
+# (+ to the left, - to the right) and its radius in metres. The two odd
+# lengths are what it takes for the lap to end where it began.
+BENDS = [(300.0, 90, 60), (150.0, -45, 30), (60.0, 45, 40),
+         (100.0, 90, 100), (782.24, 120, 20), (100.0, -30, 200),
+         (134.96, 90, 150)]
+HOME_STRAIGHT = 250.0   # from the last bend back to the line, metres
+FINE = 0.25             # metres between the points the circuit is drawn at
+
+def made_up_circuit():
+    """The circuit at every FINE metres: how far round each point is,
+    the bend there (1 / radius, + to the left and - to the right), the
+    way the track points, and where the point is (x, y and height).
+
+    Each bend tightens over 20m and opens out over 20m, or over less if
+    it is a short one. The lap climbs and drops 30m."""
+    length = HOME_STRAIGHT + sum(
+        straight + math.radians(abs(angle)) * radius
+        for straight, angle, radius in BENDS)
+    along = np.linspace(0.0, length, int(round(length / FINE)) + 1)
+    bend = np.zeros_like(along)
+    start = 0.0
+    for straight, angle, radius in BENDS:
+        start += straight
+        how_long = math.radians(abs(angle)) * radius
+        ramp = min(20.0, 0.4 * how_long)
+        bend += math.copysign(1 / radius, angle) * np.interp(
+            along, [start - ramp / 2, start + ramp / 2,
+                    start + how_long - ramp / 2, start + how_long + ramp / 2],
+            [0, 1, 1, 0])
+        start += how_long
+
+    # Add up the bends for the way the track points, and that for where
+    # each point is
+    step = np.diff(along)
+    heading = np.concatenate(
+        [[0.0], np.cumsum(0.5 * (bend[1:] + bend[:-1]) * step)])
+    halfway = 0.5 * (heading[1:] + heading[:-1])
+    # The line is put at x = 1200m, y = -800m, so that x = y = 0 is
+    # nowhere near the track
+    x = 1200.0 + np.concatenate([[0.0], np.cumsum(np.cos(halfway) * step)])
+    y = -800.0 + np.concatenate([[0.0], np.cumsum(np.sin(halfway) * step)])
+    height = 15.0 * np.sin(2 * math.pi * along / length)
+    return along, bend, heading, x, y, height
+
+along, bend, heading, map_x, map_y, height = made_up_circuit()
+LAP = float(along[-1])
+true_slope = np.gradient(height, along)
+
+# The made-up car and its quickest lap, which is lap 30 of a 40 lap
+# race in 2024 on a warm day. It brakes with 0.7 of its grip, drives
+# with 0.5, and takes every bend 0.8 times as tight as the map.
+RACE_LAPS, QUICKEST = 40, 30
+WEATHER = dict(AirTemp=25.0, Pressure=1000.0, Humidity=40.0)
+TRUE = dict(power=640e3, cla=4.5, cda=1.40, brake_fraction=0.7,
+            drive_fraction=0.5)
+TRUE_LINE = 0.8
+true_car = sim.replace(
+    F1_2024, mass=sim.race_weight(2024, QUICKEST, RACE_LAPS),
+    air_density=sim.density_of_air(25.0, 1000.0, 40.0), **TRUE)
+
+points = int(round(LAP))
+metres = np.linspace(0.0, LAP, points, endpoint=False)
+true_map = sim.Track(name='made-up race', distance=metres,
+                     curvature=np.interp(metres, along, bend),
+                     source='made up',
+                     slope=np.interp(metres, along, true_slope))
+flying = sim.simulate(sim.straightened(true_map, TRUE_LINE), true_car,
+                      periodic=True)
+
+# Its speed in m/s at every point of the circuit, and the time it has
+# taken to get there from the line
+true_speed = np.interp(along, metres, flying.speed, period=LAP)
+clock = np.concatenate(
+    [[0.0], np.cumsum(np.diff(along)
+                      / (0.5 * (true_speed[1:] + true_speed[:-1])))])
+LAP_TIME = float(clock[-1])
+
+LATE = 0.085    # seconds the speed is stamped later than the positions
+
+# Where the timing loops are, in metres round the lap: a dozen of them,
+# none in a slow corner
+LOOPS = np.array([0.0, 250.0, 480.0, 720.0, 950.0, 1150.0, 1350.0, 1550.0,
+                  1800.0, 2000.0, 2250.0, 2450.0])
+
+# What real data does wrong, each in a known amount (see WHERE THE CAR
+# IS and GEOMETRY in the notes at the top of Simulator.py).
+# made_up_stint() says what each of these is.
+ROUGH = ('loops', 'slip', 'stamps', 'map faults', 'strays', 'off track',
+         'zeros', 'position hole', 'short lap')
+
+def seconds(column):
+    """A column of FastF1 times as plain numbers of seconds."""
+    return column.dt.total_seconds().to_numpy()
+
+class MadeUpLap(dict):
+    """One lap as FastF1 hands it over: its number, driver and time,
+    and the samples recorded during it.
+
+    What build_reference() asks a lap for is here under FastF1's own
+    names: 'LapNumber', 'Driver', 'LapTime' and the three get_...()
+    calls. The rest is kept under names of its own, with a _ in front:
+      _positions  this lap's position samples
+      _car        the speed samples of the driver's whole stint
+      _rows       which rows of those are this lap's (first, one past
+                  the last)
+      _weather    the weather on the lap, or None
+      _pits       whether the lap starts or ends in the pits
+      _unreadable whether asking for its speed samples fails
+    """
+
+    def get_pos_data(self):
+        return self['_positions'].copy()
+
+    def get_car_data(self, pad=0, pad_side='both'):
+        # pad asks for that many samples from the laps either side too
+        if self['_unreadable']:
+            raise KeyError("no car data")
+        first, last = self['_rows']
+        return self['_car'].iloc[max(first - pad, 0):last + pad].copy()
+
+    def get_weather_data(self):
+        return self['_weather']
+
+class MadeUpLaps:
+    """A race's laps, and the ways of picking from them that
+    build_reference() uses."""
+
+    def __init__(self, laps):
+        self.laps = list(laps)
+
+    def pick_drivers(self, driver):
+        return MadeUpLaps(lap for lap in self.laps
+                          if lap['Driver'] == driver)
+
+    def pick_quicklaps(self):
+        # FastF1 keeps the laps within 107% of the quickest
+        if not self.laps:
+            return self
+        most = 1.07 * min(lap['LapTime'] for lap in self.laps)
+        return MadeUpLaps(lap for lap in self.laps if lap['LapTime'] < most)
+
+    def pick_wo_box(self):
+        # ... and the laps that neither start nor end in the pits
+        return MadeUpLaps(lap for lap in self.laps if not lap['_pits'])
+
+    def pick_fastest(self):
+        if not self.laps:
+            return None
+        return min(self.laps, key=lambda lap: lap['LapTime'])
+
+    def iterlaps(self):
+        return enumerate(self.laps)
+
+    def __getitem__(self, column):
+        # laps['LapNumber'] is every lap's number, as it is in FastF1
+        return np.array([lap[column] for lap in self.laps])
+
+def bump(place, length):
+    """A smooth bump along the circuit: 1 at `place`, falling to 0 half
+    of `length` either side of it."""
+    reach = (along - place) / length
+    return np.where(np.abs(reach) < 0.5, np.cos(math.pi * reach) ** 2, 0.0)
+
+def made_up_stint(driver, numbers, slower, pits, begins, rng, faults=(),
+                  heights=True, weather=WEATHER, drs=(), late=LATE,
+                  drift=0.0, reads=1.0, unreadable=()):
+    """One driver's laps, driven one after the other without stopping.
+
+    numbers: the number of each lap in the race
+    slower: how many times as long as the quickest lap each one takes
+    pits: for each lap, whether it starts or ends in the pits
+    begins: the time on the session's clock at which the first starts
+    faults: the names of the faults the samples are to have. Each is
+        explained where it is made, below.
+    heights: whether the positions carry a height
+    drs: the numbers of the laps driven with DRS open on the long
+        straight
+    late: seconds the speed is stamped later than the positions
+    drift: seconds later still for every second of the stint
+    reads: what the speed sensor reads, as a share of the true speed
+    unreadable: the numbers of the laps whose speed cannot be read
+    """
+    numbers, slower = np.asarray(numbers), np.asarray(slower)
+    starts = begins + np.concatenate([[0.0], np.cumsum(LAP_TIME * slower)])
+    most = int((starts[-1] - begins) / 0.18) + 1
+
+    def car_at(moment):
+        """Which of the stint's laps the car is on at each moment (0 for
+        the first), how many seconds into it, and how far round it has
+        got."""
+        which = np.clip(np.searchsorted(starts, moment, side='right') - 1,
+                        0, len(slower) - 1)
+        into = moment - starts[which]
+        # clock holds the time at each distance on the quickest lap.
+        # Read the other way round, it gives the distance at each time.
+        return which, into, np.interp(into / slower[which], clock, along)
+
+    # ---- positions, about 4.5 times a second ----
+    moment = begins + np.cumsum(rng.uniform(0.18, 0.26, most))
+    moment = moment[moment < starts[-1]]
+    which, into, at = car_at(moment)
+    stamp = moment.copy()               # the time each one is stamped
+    fed = at.copy()                     # how far round it says the car is
+    sideways = np.zeros(len(at))        # and how far left of the map
+    passed = np.searchsorted(LOOPS, at, side='right') - 1   # last loop
+    on_quickest = numbers[which] == QUICKEST    # taken on that lap
+
+    if 'loops' in faults:
+        # Between one timing loop and the next the positions follow the
+        # car's speed, and run up to 3% fast or slow. At each loop they
+        # are put right in one jump.
+        rate = rng.uniform(-0.03, 0.03, (len(numbers), len(LOOPS)))
+        fed += rate[which, passed] * (at - LOOPS[passed])
+    if 'jumps' in faults:
+        # Nothing wrong between the loops, but at four of them the
+        # positions jump 8m forwards, and at the next they jump back
+        fed += 8.0 * np.isin(passed, (1, 4, 6, 9))
+    if 'slip' in faults:
+        # On the quickest lap they sit 15m behind for 500m
+        fed -= 15.0 * (on_quickest & (at > 1000) & (at < 1500))
+    if 'stamps' in faults:
+        # Each time stamp is up to 0.03s out
+        stamp += rng.uniform(-0.03, 0.03, len(stamp))
+    if 'strays' in faults:
+        # One sample in every 700 is thrown 2m to one side
+        sideways += 2.0 * (np.arange(len(at)) % 700 == 350)
+    if 'off track' in faults:
+        # Lap 9 runs up to 12m wide for 100m
+        wide = (numbers[which] == 9) & (at > 900) & (at < 1000)
+        sideways += wide * 12.0 * np.sin(math.pi * (at - 900) / 100.0) ** 2
+
+    # The map every lap is drawn on, with its own faults
+    left_x, left_y = -np.sin(heading), np.cos(heading)
+    out = np.zeros(len(along))
+    if 'map faults' in faults:
+        # In three places it steps 0.3m to one side and back within 5m
+        for place in (450.0, 1400.0, 2300.0):
+            out += 0.3 * bump(place, 5.0)
+    fed = fed % LAP
+    columns = {
+        'X': np.interp(fed, along, map_x + out * left_x)
+        + sideways * np.interp(fed, along, left_x),
+        'Y': np.interp(fed, along, map_y + out * left_y)
+        + sideways * np.interp(fed, along, left_y)}
+    if heights:
+        columns['Z'] = np.interp(fed, along, height)
+    positions = pd.DataFrame({name: np.round(10 * values)
+                              for name, values in columns.items()})
+    positions['SessionTime'] = pd.to_timedelta(stamp, unit='s')
+    keep = np.ones(len(positions), dtype=bool)
+    if 'zeros' in faults:
+        # One sample in every 150 is missing, and FastF1 fills it with
+        # zeros
+        missing = np.arange(len(positions)) % 150 == 75
+        positions.loc[missing, list(columns)] = 0.0
+    if 'position hole' in faults:
+        # The quickest lap has no positions for 2s, half-way round the
+        # fourth bend
+        keep &= ~(on_quickest & (into > 15.0) & (into < 17.0))
+    if 'gaps' in faults:
+        # Every lap has none for 1.2s on the long straight
+        keep &= ~((into > 20.0) & (into < 21.2))
+    if 'short lap' in faults:
+        # Lap 15 has none after its first ten seconds
+        keep &= ~((numbers[which] == 15) & (into > 10.0))
+    positions, stamp = positions[keep], stamp[keep]
+
+    # ---- speed, about 4 times a second, on a clock that runs late ----
+    # (moment, which, into, at and keep start again here, for the
+    # moments at which the speed is sampled)
+    moment = begins + np.cumsum(rng.uniform(0.20, 0.28, most))
+    moment = moment[moment < starts[-1]]
+    which, into, at = car_at(moment)
+    on_quickest = numbers[which] == QUICKEST
+    open_flap = np.isin(numbers[which], drs) & (at > 1000) & (at < 1600)
+    car = pd.DataFrame({
+        'Speed': np.round(3.6 * reads * np.interp(at, along, true_speed)
+                          / slower[which]),
+        'DRS': np.where(open_flap, 12, 0),
+        'SessionTime': pd.to_timedelta(
+            moment + late + drift * (moment - begins), unit='s')})
+    keep = np.ones(len(car), dtype=bool)
+    if 'zeros' in faults:
+        car.loc[np.arange(len(car)) % 150 == 75, 'Speed'] = 0.0
+    if 'speed hole' in faults:
+        # The quickest lap has no speed for 2.3s, from the end of the
+        # long straight and through most of the braking for the hairpin
+        keep &= ~(on_quickest & (into > 25.0) & (into < 27.3))
+    # Three ways for the quickest lap to have too little speed to use:
+    # none after its first 20 seconds, none in its first 4 seconds, and
+    # only every fourth sample
+    if 'speed stops' in faults:
+        keep &= ~(on_quickest & (into > 20.0))
+    if 'speed starts late' in faults:
+        keep &= ~(on_quickest & (into < 4.0))
+    if 'sparse speed' in faults:
+        keep &= ~(on_quickest & (np.arange(len(car)) % 4 > 0))
+    car = car[keep].reset_index(drop=True)
+    ticked = seconds(car['SessionTime'])
+
+    # ---- cut into laps by the time each sample is stamped ----
+    laps = []
+    for index, number in enumerate(numbers):
+        begin, end = starts[index], starts[index + 1]
+        laps.append(MadeUpLap(
+            LapNumber=float(number), Driver=driver,
+            LapTime=pd.Timedelta(seconds=end - begin),
+            _positions=positions[(stamp >= begin) & (stamp < end)],
+            _car=car, _rows=(int(np.searchsorted(ticked, begin)),
+                             int(np.searchsorted(ticked, end))),
+            _weather=weather, _pits=bool(pits[index]),
+            _unreadable=number in unreadable))
+    return laps, float(starts[-1])
+
+def made_up_race(seed=1, **options):
+    """The made-up race. Driver AAA runs laps 4 to 39: lap 4 slowly,
+    lap 30 the quickest, lap 39 into the pits. Driver BBB runs laps 5
+    to 8, all of them slower, and is first in the list of laps. The
+    options are made_up_stint()'s."""
+    rng = np.random.default_rng(seed)
+    numbers = np.arange(4, 40)
+    slower = 1.0 + rng.uniform(0.004, 0.02, len(numbers))
+    slower[numbers == 4] = 1.12
+    slower[numbers == QUICKEST] = 1.0
+    slower[numbers == 39] = 1.05
+    laps, ends = made_up_stint('AAA', numbers, slower, numbers == 39,
+                               3000.0, rng, **options)
+    others, ends = made_up_stint('BBB', [5, 6, 7, 8],
+                                 [1.03, 1.031, 1.029, 1.032], [False] * 4,
+                                 ends + 100.0, rng, **options)
+    return types.SimpleNamespace(
+        laps=MadeUpLaps(others + laps), total_laps=RACE_LAPS,
+        slower=dict(zip(numbers.tolist(), slower.tolist())))
+
+def read(race, driver=None, year=2024, **options):
+    """build_reference() on a made-up race.
+
+    build_reference() gets its race by `import telemetry` and a call to
+    telemetry.load_session(). Python keeps every module it has imported
+    in sys.modules, and an import looks there first. So for as long as
+    build_reference() runs, sys.modules holds a stand-in under that
+    name whose load_session() hands over the made-up race. Whatever was
+    there before is put back afterwards. No F1 data is touched."""
+    real = sys.modules.get('telemetry')
+    sys.modules['telemetry'] = types.SimpleNamespace(
+        load_session=lambda year, name, session_type='R': race)
+    try:
+        return sim.build_reference(year, 'made-up race', driver, **options)
+    finally:
+        if real is None:
+            del sys.modules['telemetry']
+        else:
+            sys.modules['telemetry'] = real
+
+circuit_points = cKDTree(np.column_stack([map_x, map_y]))
+
+def typical(values):
+    """The size of a typical one of these: the root of their mean
+    square."""
+    return float(np.sqrt(np.mean(np.square(values))))
+
+def against_the_truth(reference, slower=1.0, without=None):
+    """How far a reference is from the made-up truth.
+
+    Each point of its track is matched to the nearest point of the
+    circuit, and compared with what the car was really doing there, on
+    a lap that took `slower` times as long as its quickest. Returns the
+    typical and the worst error in its speed (km/h) and in its bends
+    (as sideways g at the true speed), the worst error in its slope,
+    and which point of the circuit each point of the track is. The
+    first and last 20 points are left out, and so is the stretch of the
+    circuit between the two distances in `without`, if given.
+    """
+    track = reference.track
+    _, nearest = circuit_points.query(
+        np.column_stack([track.channels['x'], track.channels['y']]))
+    judged = np.ones(len(nearest), dtype=bool)
+    judged[:20] = judged[-20:] = False
+    if without is not None:
+        judged &= ((along[nearest] < without[0])
+                   | (along[nearest] > without[1]))
+    speed = (reference.speed_kph
+             - 3.6 * true_speed[nearest] / slower)[judged]
+    sideways = (true_speed[nearest] ** 2 / GRAVITY
+                * (track.curvature - np.abs(bend[nearest])))[judged]
+    slope = (track.slope - true_slope[nearest])[judged]
+    return dict(speed=typical(speed), worst_speed=float(np.abs(speed).max()),
+                bends=typical(sideways),
+                worst_bend=float(np.abs(sideways).max()),
+                slope=float(np.abs(slope).max()), nearest=nearest)
+
+check("the made-up circuit ends where it began",
+      math.hypot(map_x[-1] - map_x[0], map_y[-1] - map_y[0]) < 0.05
+      and abs(heading[-1] - 2 * math.pi) < 1e-4,
+      f"{LAP:.0f}m round, and a lap by the made-up car takes "
+      f"{LAP_TIME:.3f}s")
+
+# ---- The race as it should be: nothing wrong with the samples but
+# their rounding and the late clock ----
+race = made_up_race()
+reference = read(race)
+miss = against_the_truth(reference)
+built = reference.track
+
+check("with no driver named, it takes whoever set the fastest lap",
+      reference.driver == 'AAA', reference.driver)
+check("and that driver's quickest lap, with the time it was given",
+      reference.lap_choice == 'lap 30, the quickest'
+      and abs(reference.official_time - LAP_TIME) < 1e-5,
+      f"{reference.lap_choice}, {reference.official_time:.3f}s")
+check("the slow lap and the lap into the pits are not used, and a clean "
+      "map has no faults",
+      built.source == ('pooled from 34 laps, features quicker than 1.5 a '
+                       'second smoothed away, 0m of map faults left out'),
+      built.source)
+close("the speed's clock is found to run 0.085s late (s)",
+      reference.stream_offset, LATE, 0.003)
+check("and is put right",
+      'later than position' in reference.clock
+      and reference.clock.endswith('): corrected'), reference.clock)
+check("the line covers the lap, bar a few metres at the ends",
+      LAP - 35.0 < built.length < LAP + 3.0,
+      f"{built.length:.0f}m of {LAP:.0f}m")
+check("the speed at each point is the true car's there",
+      miss['speed'] < 1.5 and miss['worst_speed'] < 18.0,
+      f"typically within {miss['speed']:.2f} km/h, at worst "
+      f"{miss['worst_speed']:.1f}")
+own_time = float(np.sum(built.step / true_speed[miss['nearest']]))
+close("so the time along the line is the true car's (s)",
+      reference.lap_time, own_time, 0.04)
+check("the bends are the circuit's",
+      miss['bends'] < 0.15 and miss['worst_bend'] < 1.3,
+      f"typically within {miss['bends']:.2f}g at the true speed, at "
+      f"worst {miss['worst_bend']:.2f}g")
+close("the tightest of them, radius (m)", 1 / built.curvature.max(), 20.0,
+      1.5)
+check("the slope is the circuit's", miss['slope'] < 0.008,
+      f"within {miss['slope']:.2%}, on slopes of up to "
+      f"{np.abs(true_slope).max():.1%}")
+check("and the climb is described", reference.hills.startswith(
+      '30m from the lowest point of the lap to the highest'),
+      reference.hills[:51])
+check("the car is given the weight it had on lap 30 of 40",
+      reference.mass == sim.race_weight(2024, 30, 40)
+      and 'lap 30 of 40' in reference.conditions,
+      "no weight" if reference.mass is None else f"{reference.mass:.1f}kg")
+close("and the air of the day (kg/m3)", reference.air_density,
+      true_car.air_density, 1e-12)
+check("nothing is eased and no problems are noted",
+      reference.eased == "" and reference.notes == [],
+      f"{reference.eased} {reference.notes}")
+
+# The reference hangs together: the true car, run along the track as it
+# was built, does the speeds that were read
+rerun = sim.simulate(sim.straightened(built, TRUE_LINE), true_car)
+apart = typical(rerun.speed * 3.6 - reference.speed_kph)
+check("the true car, run along the track as built, does the speeds as read",
+      apart < 3.0, f"typically within {apart:.2f} km/h")
+close("and takes the same time (s)", rerun.lap_time, reference.lap_time, 0.1)
+
+# From the raw samples to a car. One lap pins a car down only roughly
+# (see FITTING in the notes at the top of Simulator.py), so the power,
+# downforce and drag are not asked to be as close as the rest.
+shared, cars, tracks, outcome = sim.fit_multi([reference], F1_2024,
+                                              verbose=False)
+found = cars[0]
+close("the fit, from this lap: braking share", found.brake_fraction, 0.7,
+      0.03)
+close("drive share", found.drive_fraction, 0.5, 0.02)
+close("line", tracks[0].curvature.max() / built.curvature.max(), TRUE_LINE,
+      0.03)
+for label, name, tolerance in (("power", 'power', 0.05),
+                               ("downforce", 'cla', 0.08),
+                               ("drag", 'cda', 0.06)):
+    close(f"{label}, as a share of the true car's",
+          getattr(found, name) / getattr(true_car, name), 1.0, tolerance)
+worth_true = sim.setup_effects(sim.straightened(true_map, TRUE_LINE),
+                               true_car)
+worth_found = sim.setup_effects(tracks[0], found)
+furthest = max(abs(worth_found[label] / worth_true[label] - 1)
+               for label in worth_true)
+check("and its table of what a change is worth is the true car's",
+      furthest < 0.08, f"every row within {furthest:.0%}")
+
+# ---- Three faults in the map, and nothing else wrong ----
+def metres_left_out(reference):
+    """How many metres of the map were left out as faults, or None if
+    its source does not say."""
+    said = reference.track.source.rsplit(', ', 1)[-1]
+    if not said.endswith('m of map faults left out'):
+        return None
+    return int(said.split('m')[0])
+
+faulty = read(made_up_race(faults=('map faults',)))
+found_faults = metres_left_out(faulty)
+check("three faults in the map are found and left out",
+      found_faults is not None and 5 <= found_faults <= 40,
+      faulty.track.source.rsplit(', ', 1)[-1])
+
+# ---- The same race as real data has it: everything in ROUGH ----
+rough = read(made_up_race(faults=ROUGH))
+miss = against_the_truth(rough)
+found_faults = metres_left_out(rough)
+check("rough data: the same lap, and the lap with too few samples is "
+      "left out", rough.lap_choice == 'lap 30, the quickest'
+      and rough.track.source.startswith('pooled from 33 laps,'),
+      rough.track.source[:19])
+check("the stray samples and the lap that ran wide are left out with "
+      "the map's faults", found_faults is not None
+      and 40 <= found_faults <= 150, rough.track.source.rsplit(', ', 1)[-1])
+close("the clock is still found, near enough (s)", rough.stream_offset,
+      LATE, 0.03)
+check("the speed at each point is still the true car's",
+      miss['speed'] < 3.0 and miss['worst_speed'] < 18.0,
+      f"typically within {miss['speed']:.2f} km/h, at worst "
+      f"{miss['worst_speed']:.1f}")
+check("the bends are still the circuit's",
+      miss['bends'] < 0.16 and miss['worst_bend'] < 1.6,
+      f"typically within {miss['bends']:.2f}g, at worst "
+      f"{miss['worst_bend']:.2f}g")
+check("and so is the slope", miss['slope'] < 0.008,
+      f"within {miss['slope']:.2%}")
+check("none of it is a problem worth a note", rough.notes == [],
+      "; ".join(rough.notes))
+rerun = sim.simulate(sim.straightened(rough.track, TRUE_LINE), true_car)
+apart = typical(rerun.speed * 3.6 - rough.speed_kph)
+check("the true car, run along that track, still does the speeds as read",
+      apart < 4.0, f"typically within {apart:.2f} km/h")
+
+# ---- Faults that are checked one at a time ----
+QUICK = dict(max_laps=8)        # eight laps are enough for most of these
+
+def kilos(mass):
+    """A weight, for the end of a check's line."""
+    return "no weight" if mass is None else f"{mass:.1f}kg"
+
+slipped = against_the_truth(read(made_up_race(faults=('slip',))))
+miss = against_the_truth(reference)
+check("positions that sit 15m behind for 500m do not move the speed",
+      abs(slipped['speed'] - miss['speed']) < 0.1
+      and abs(slipped['worst_speed'] - miss['worst_speed']) < 1.0,
+      f"typically within {slipped['speed']:.2f} km/h of the truth with "
+      f"them, {miss['speed']:.2f} without")
+
+holed = read(made_up_race(faults=('speed hole',)), **QUICK)
+miss = against_the_truth(holed, without=(1540.0, 1760.0))
+check("a 2.3s hole in the speed: the lap is still used, and the hole is "
+      "noted", holed.lap_choice == 'lap 30, the quickest'
+      and len(holed.notes) > 0
+      and 'hole in its speed data' in holed.notes[0], "; ".join(holed.notes))
+check("and the speed either side of it is still in the right place",
+      miss['speed'] < 1.5 and miss['worst_speed'] < 18.0,
+      f"typically within {miss['speed']:.2f} km/h, at worst "
+      f"{miss['worst_speed']:.1f}")
+
+high = read(made_up_race(reads=1.015), **QUICK)
+miss = against_the_truth(high, slower=1 / 1.015)
+check("a speed sensor that reads 1.5% high: each reading is still put in "
+      "the right place", miss['speed'] < 1.5 and miss['worst_speed'] < 18.0,
+      f"typically within {miss['speed']:.2f} km/h of what it read")
+check("and the lap time it adds up to is seen not to match",
+      len(high.notes) == 1
+      and 'the line or the speed data is wrong' in high.notes[0],
+      "; ".join(high.notes))
+
+# A sensor 10% high cannot be this lap's: the distance it adds up to is
+# not believed, and each reading goes where the positions put it. The
+# lap is also given a hole in its positions, where that is a guess.
+wild = read(made_up_race(reads=1.1, faults=('position hole',)), **QUICK)
+miss = against_the_truth(wild, slower=1 / 1.1, without=(760.0, 930.0))
+check("a sensor 10% high: the speed is placed by the positions, and that "
+      "is said", any('positions were used' in note for note in wild.notes)
+      and miss['speed'] < 3.0,
+      f"typically within {miss['speed']:.2f} km/h of what it read")
+check("and so is the hole in the positions",
+      any('hole of over a second in its position data' in note
+          for note in wild.notes), f"{len(wild.notes)} notes")
+close("the clock is still found, whatever the sensor reads (s)",
+      wild.stream_offset, LATE, 0.005)
+
+jumpy = read(made_up_race(faults=('jumps',)), **QUICK)
+close("positions that jump 8m at the timing loops: the clock is still "
+      "found (s)", jumpy.stream_offset, LATE, 0.01)
+
+gappy = read(made_up_race(faults=('gaps',)), **QUICK)
+check("a hole in every lap's positions is noted",
+      len(gappy.notes) == 1 and gappy.notes[0].startswith(
+          'every lap has a hole of over a second in its position data'),
+      "; ".join(gappy.notes))
+
+# ---- Which lap, and whose ----
+# The second and third quickest of the clean laps: the number of each,
+# and how many times as long as lap 30 it took
+(second_slower, second), (third_slower, third) = sorted(
+    (slower, number) for number, slower in race.slower.items()
+    if number not in (4, 30, 39))[:2]
+with_drs = read(made_up_race(drs=[QUICKEST]), **QUICK)
+miss = against_the_truth(with_drs, slower=second_slower)
+from_lap_30 = against_the_truth(with_drs)['speed']
+check("DRS open on the quickest lap: the quickest with it shut is taken",
+      with_drs.lap_choice.startswith(
+          f"lap {second}, the quickest with DRS shut (lap 30 was ")
+      and abs(with_drs.official_time - LAP_TIME * second_slower) < 1e-5
+      and with_drs.notes == [], with_drs.lap_choice)
+check("with that lap's speed, not lap 30's, and that lap's weight",
+      miss['speed'] < 1.5 and miss['speed'] < from_lap_30
+      and with_drs.mass == sim.race_weight(2024, second, 40),
+      f"within {miss['speed']:.2f} km/h of it and {from_lap_30:.2f} of "
+      f"lap 30's, {kilos(with_drs.mass)}")
+all_open = read(made_up_race(drs=range(1, 41)), **QUICK)
+check("DRS open on every lap: the quickest is taken, with a warning",
+      all_open.lap_choice == 'lap 30, the quickest'
+      and len(all_open.notes) == 1
+      and all_open.notes[0].startswith('DRS was open for'),
+      "; ".join(all_open.notes)[:40] + "...")
+
+# A lap whose speed cannot be used is passed over for the next quickest
+for label, missing in (
+        ("no speed for the quickest lap", dict(unreadable=[QUICKEST])),
+        ("speed that stops half-way round it",
+         dict(faults=('speed stops',))),
+        ("speed that starts 4s into it",
+         dict(faults=('speed starts late',))),
+        ("only every fourth speed sample of it",
+         dict(faults=('sparse speed',)))):
+    next_best = read(made_up_race(**missing), **QUICK)
+    check(f"{label}: the next quickest is taken, and it is said why",
+          next_best.lap_choice == (f"lap {second}, the quickest with speed "
+                                   f"data that can be used")
+          and abs(next_best.official_time - LAP_TIME * second_slower) < 1e-5
+          and next_best.mass == sim.race_weight(2024, second, 40)
+          and next_best.notes == ['lap 30 was quicker, but had no speed '
+                                  'data that could be used'],
+          "; ".join(next_best.notes))
+skipped = read(made_up_race(drs=[QUICKEST], unreadable=[second]), **QUICK)
+check("DRS open on the quickest and no speed for the next: the one after "
+      "that, and it is said why", skipped.lap_choice.startswith(
+          f"lap {third}, the quickest with DRS shut (lap 30 was ")
+      and abs(skipped.official_time - LAP_TIME * third_slower) < 1e-5
+      and skipped.notes == [f"lap {second} was quicker, but had no speed "
+                            f"data that could be used"],
+      "; ".join(skipped.notes))
+message = refused(lambda: read(made_up_race(unreadable=range(1, 41))))
+check("no speed for any lap", message is not None, message or "")
+
+named = read(race, 'BBB')
+miss = against_the_truth(named, slower=1.029)
+check("a driver who is named: that driver's quickest lap",
+      named.driver == 'BBB' and named.lap_choice == 'lap 7, the quickest'
+      and named.track.source.startswith('pooled from 4 laps,')
+      and miss['speed'] < 1.5,
+      f"{named.lap_choice}, speed within {miss['speed']:.2f} km/h")
+message = refused(lambda: read(race, 'CCC'))
+check("a driver with no laps", message is not None, message or "")
+message = refused(lambda: sim._fastest_driver(MadeUpLaps([])))
+check("a race with no fastest lap", message is not None,
+      (message or "")[:52] + "...")
+asked = read(race, max_laps=5, spacing=2.0, lam=1000.0, drag_limited=False)
+check("what it is asked for it does: five laps, points 2m apart, a "
+      "stiffness, no top speed",
+      asked.track.source.startswith('pooled from 5 laps, smoothed with '
+                                    'lam 1000,')
+      and asked.track.step == 2.0 and asked.drag_limited is False
+      and reference.drag_limited is True, asked.track.source[:44])
+
+# ---- What it does when something is missing ----
+no_heights = read(made_up_race(heights=False), **QUICK)
+check("no heights in the positions: a flat track, said so",
+      not no_heights.track.slope.any() and 'no heights' in no_heights.hills,
+      no_heights.hills)
+no_weather = read(made_up_race(weather=None), **QUICK)
+check("no weather: no air density, said so",
+      no_weather.air_density is None
+      and 'no weather data' in no_weather.conditions,
+      no_weather.conditions.split('; ')[1])
+old = read(race, year=1990, **QUICK)
+check("a season with no weight on record: no weight, said so",
+      old.mass is None and 'not known' in old.conditions,
+      old.conditions.split('; ')[0])
+length = race.total_laps
+del race.total_laps
+unplanned = read(race, **QUICK)
+race.total_laps = length
+check("no race distance on record: the last lap anyone drove stands in",
+      unplanned.mass == sim.race_weight(2024, 30, 39)
+      and 'lap 30 of 39' in unplanned.conditions, kilos(unplanned.mass))
+
+# ---- The two clocks ----
+agreeing = read(made_up_race(late=0.0), **QUICK)
+check("clocks that agree are said to", agreeing.clock
+      == 'speed and position clocks agree', agreeing.clock)
+drifting = read(made_up_race(drift=0.0005), **QUICK)
+check("clocks that drift apart through the race are not corrected",
+      drifting.stream_offset is None
+      and drifting.clock.endswith('not corrected'), drifting.clock)
+pair = made_up_race()
+pair.laps = MadeUpLaps(lap for lap in pair.laps.laps
+                       if lap['LapNumber'] in (29, 30))
+two = read(pair)
+check("nor are clocks measured on only two laps",
+      two.stream_offset is None and 'could not be compared' in two.clock,
+      two.clock)
+
+# One lap's clock, measured on its own
+quickest = race.laps.pick_fastest()
+samples, readings = quickest.get_pos_data(), quickest.get_car_data()
+stamped = seconds(samples['SessionTime'])
+x, y = samples['X'].to_numpy(), samples['Y'].to_numpy()
+ticked = seconds(readings['SessionTime'])
+shown = readings['Speed'].to_numpy()
+close("one lap's clock, measured on its own (s)",
+      sim._stream_offset(stamped, x, y, ticked, shown), LATE, 0.005)
+check("a clock 1.5s late is beyond its reach, and it says it cannot tell",
+      sim._stream_offset(stamped, x, y, ticked + 1.5, shown) is None)
+check("nor can it with the speed from half a lap away",
+      sim._stream_offset(stamped, x, y, ticked,
+                         np.roll(shown, len(shown) // 2)) is None)
+check("nor with only every fifth speed sample",
+      sim._stream_offset(stamped, x, y, ticked[::5], shown[::5]) is None)
+
+# One lap's speed, placed on the track by how far the car had gone
+placed = sim._speed_by_distance(built, stamped, x, y, ticked, shown, LATE)
+check("one lap's speed, placed by the distance the car had gone",
+      placed is not None
+      and typical(placed - 3.6 * true_speed[against_the_truth(
+          reference)['nearest']]) < 1.5)
+check("speed that adds up to a lap a tenth too long is not this lap's",
+      sim._speed_by_distance(built, stamped, x, y, ticked, shown * 1.1,
+                             LATE) is None)
+check("and every fifth speed sample is too few to place",
+      sim._speed_by_distance(built, stamped, x, y, ticked[::5], shown[::5],
+                             LATE) is None)
+# FastF1's positions are in tenths of a metre, the line in metres
+between = [5 * (built.channels[name][100] + built.channels[name][101])
+           for name in ('x', 'y')]
+close("a sample half-way between two points of the line is placed "
+      "half-way (m)", sim._distance_along(built, between[:1], between[1:])[0],
+      0.5 * (built.distance[100] + built.distance[101]), 0.01)
+
+# ---- Told that a car of this kind has no more than 2g, it has to
+# call the short bends kinks and ease them, and report the long ones ----
+gentle = read(race, most_g=2.0, **QUICK)
+asks = (gentle.speed_kph / 3.6) ** 2 * gentle.track.curvature / GRAVITY
+as_it_came = gentle.track.channels.get('map_curvature',
+                                       gentle.track.curvature)
+eased = gentle.track.curvature < as_it_came
+check("bends too tight for the speed are eased, and said to be",
+      eased.any() and abs(asks[eased].max() - 2.0) < 1e-9
+      and gentle.eased.startswith('map eased over'), gentle.eased[:53])
+check("and the long ones are left alone and noted",
+      asks.max() > 2.5
+      and any('too long to be a kink' in note for note in gentle.notes),
+      f"still asks for {asks.max():.1f}g somewhere")
+
+# ---------------------------------------------------------------------------
+print("14. At the size of a Formula Student car")
 # ---------------------------------------------------------------------------
 
 # Something like a Formula Student car: 280kg with its driver, 60kW at
